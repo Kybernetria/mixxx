@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <future>
+#include <type_traits>
+#include <utility>
 
 namespace mixxx {
 namespace {
@@ -10,6 +12,10 @@ namespace {
 TrackPointer makeTrack() {
     return Track::newTemporary(QStringLiteral("/tmp/mixxx-memory-cues-test.mp3"));
 }
+
+static_assert(std::is_same_v<
+        decltype(std::declval<const Track&>().cueRevisionToken()),
+        std::shared_ptr<const std::atomic<std::uint64_t>>>);
 
 TEST(MemoryCuesTest, QuantizesAndSuppressesDuplicateCreation) {
     auto track = makeTrack();
@@ -103,6 +109,91 @@ TEST(MemoryCuesTest, ImportedPointsMergeWithoutQuantizationOrHotcueConversion) {
     EXPECT_EQ(1, MemoryCues::removeAll(*track));
     EXPECT_TRUE(track->getCuePoints().contains(mainCue));
     EXPECT_TRUE(track->getCuePoints().contains(hotcue));
+}
+
+TEST(MemoryCuesTest, DuplicateMembershipDetachesOnlyAfterFinalRemoval) {
+    auto track = makeTrack();
+    const auto cue = track->createAndAddCue(CueType::Memory,
+            Cue::kNoHotCue,
+            audio::FramePos(100),
+            audio::kInvalidFramePos);
+    ASSERT_TRUE(cue);
+    const auto token = track->cueRevisionToken();
+    track->setCuePoints({cue, cue});
+    const auto membershipRevision = token->load(std::memory_order_acquire);
+    EXPECT_EQ(membershipRevision, 2);
+
+    track->removeCue(cue);
+    EXPECT_EQ(token->load(std::memory_order_acquire), membershipRevision + 1);
+    cue->setLabel(QStringLiteral("still attached"));
+    EXPECT_EQ(token->load(std::memory_order_acquire), membershipRevision + 2);
+
+    track->removeCue(cue);
+    const auto finalRemovalRevision = token->load(std::memory_order_acquire);
+    EXPECT_EQ(finalRemovalRevision, membershipRevision + 3);
+    cue->setLabel(QStringLiteral("detached"));
+    EXPECT_EQ(token->load(std::memory_order_acquire), finalRemovalRevision);
+}
+
+TEST(MemoryCuesTest, BulkReplacementAndDestructionDetachRetainedObservers) {
+    auto track = makeTrack();
+    const auto oldCue = track->createAndAddCue(CueType::Memory,
+            Cue::kNoHotCue,
+            audio::FramePos(100),
+            audio::kInvalidFramePos);
+    const auto oldToken = track->cueRevisionToken();
+    track->setCuePoints({oldCue, oldCue});
+    const auto beforeReplacement = oldToken->load(std::memory_order_acquire);
+    const auto newCue = track->createAndAddCue(CueType::Memory,
+            Cue::kNoHotCue,
+            audio::FramePos(200),
+            audio::kInvalidFramePos);
+    track->setCuePoints({newCue});
+    const auto afterReplacement = oldToken->load(std::memory_order_acquire);
+    EXPECT_EQ(afterReplacement, beforeReplacement + 2);
+    oldCue->setLabel(QStringLiteral("replaced"));
+    EXPECT_EQ(oldToken->load(std::memory_order_acquire), afterReplacement);
+
+    const auto destructionToken = track->cueRevisionToken();
+    const auto beforeDestruction = destructionToken->load(std::memory_order_acquire);
+    track.reset();
+    EXPECT_EQ(destructionToken->load(std::memory_order_acquire), beforeDestruction);
+    newCue->setLabel(QStringLiteral("track destroyed"));
+    EXPECT_EQ(destructionToken->load(std::memory_order_acquire), beforeDestruction);
+}
+
+TEST(MemoryCuesTest, MainAndTemporaryLoopMembershipAdvanceOnceAndEmitOnce) {
+    auto track = makeTrack();
+    int updates = 0;
+    QObject::connect(track.get(), &Track::cuesUpdated, track.get(), [&updates] { ++updates; });
+    const auto token = track->cueRevisionToken();
+
+    track->setMainCuePosition(audio::FramePos(100));
+    EXPECT_EQ(token->load(std::memory_order_acquire), 1);
+    EXPECT_EQ(updates, 1);
+    EXPECT_TRUE(track->isDirty());
+
+    track->markClean();
+    track->setMainCuePosition(audio::kInvalidFramePos);
+    EXPECT_EQ(token->load(std::memory_order_acquire), 2);
+    EXPECT_EQ(updates, 2);
+    EXPECT_TRUE(track->isDirty());
+
+    track->markClean();
+    const auto loop = track->createAndAddCue(CueType::Loop,
+            Cue::kNoHotCue,
+            audio::FramePos(200),
+            audio::kInvalidFramePos);
+    ASSERT_TRUE(loop);
+    EXPECT_EQ(token->load(std::memory_order_acquire), 3);
+    EXPECT_EQ(updates, 3);
+    EXPECT_TRUE(track->isDirty());
+
+    track->markClean();
+    track->removeTempLoopCue();
+    EXPECT_EQ(token->load(std::memory_order_acquire), 4);
+    EXPECT_EQ(updates, 4);
+    EXPECT_TRUE(track->isDirty());
 }
 
 TEST(MemoryCuesTest, ConditionalEditsDoNotMutateConvertedOrRemovedCues) {

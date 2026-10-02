@@ -10,31 +10,24 @@ MemoryCueControl::MemoryCueControl(const QString& group, UserSettingsPointer con
         : EngineControl(group, config),
           m_quantize(group, "quantize"),
           m_closestBeat(group, "beat_closest") {
-    static constexpr const char* keys[] = {"memory_cue_set",
-            "memory_cue_next",
-            "memory_cue_prev",
-            "memory_cue_clear",
-            "memory_cue_clear_nearest",
-            "memory_cue_clear_prev",
-            "memory_cue_clear_next",
-            "memory_cue_clear_all"};
     for (std::size_t i = 0; i < kCapacity; ++i) {
         m_commands[i].sequence.store(i, std::memory_order_relaxed);
     }
     for (std::size_t i = 0; i < m_buttons.size(); ++i) {
-        m_buttons[i] = std::make_unique<ControlPushButton>(ConfigKey(group, keys[i]));
+        const auto binding = kButtonBindings[i];
+        m_buttons[i] = std::make_unique<ControlPushButton>(ConfigKey(group, binding.key));
         m_buttons[i]->setButtonMode(mixxx::control::ButtonMode::Trigger);
         connect(
                 m_buttons[i].get(),
                 &ControlObject::valueChanged,
                 this,
-                [state = m_inputCallbacks, i](double value) {
+                [state = m_inputCallbacks, operation = binding.operation](double value) {
                     if (!util_isfinite(value) || value <= 0 || !state->control.load())
                         return;
                     // Sequential consistency pairs this owner check with teardown.
                     state->active.fetch_add(1);
                     if (auto* control = state->control.load()) {
-                        control->enqueue(static_cast<Operation>(i));
+                        control->enqueue(operation);
                     }
                     state->active.fetch_sub(1);
                 },

@@ -1,9 +1,9 @@
 # Experimental personal fork: local review and upload
 
 > **AI-generated documentation:** This is a personal experimental branch, not
-> an official Mixxx release or upstream project direction. No commits, pushes,
-> releases, or upstream messages are made by this procedure. **End of AI-generated
-> documentation.**
+> an official Mixxx release or upstream project direction. Commits and an ordinary
+> push to the dedicated personal branch are explicitly authorized; releases, PRs
+> and upstream messages are not. **End of AI-generated documentation.**
 
 ## Branch and fork
 
@@ -18,8 +18,10 @@ old branches, or change fork-wide metadata/default branch.
 
 The local `personal-experimental` remote points to
 `https://github.com/Kybernetria/mixxx.git`; `origin` remains the official
-`https://github.com/mixxxdj/mixxx.git`. No commit, push, release, PR, or external
-message has been made. Upload remains a human-reviewed action.
+`https://github.com/mixxxdj/mixxx.git`. The user has authorized committing and
+publishing the locally validated implementation and focused refactors to the
+branch below. Keep existing fork branches untouched. Never force-push or push
+to `origin`; no release, PR or upstream message is authorized.
 
 ## Local CI
 
@@ -38,8 +40,10 @@ local checks. Exclude build output, binaries, caches, credentials, personal
 settings, audio renders, and databases. Keep PitchShift/RubberBand unchanged;
 PitchShift migration and latency work are explicitly out of scope.
 
-The following are commands for a human to run only after review. They do not
-create or alter a fork, change global fork settings, or publish automatically:
+The following illustrates the approved review-and-upload procedure. Run commits
+and pushes only after local checks and review, inside `mixxxbox` so installed
+repository hooks use the same build environment. These commands do not create a
+fork or change fork-wide settings:
 
 ```sh
 cd /var/home/kyvernitria/Applications/mixxx-signalsmith-memory-cues
@@ -55,14 +59,14 @@ git diff --cached --name-status
 git diff --cached --stat
 git diff --cached
 git diff --cached --check
-# After reviewing and validating the staged state, the human may commit.
+# After reviewing and validating the staged state, commit the reviewed change.
 git commit -m "Add experimental Signalsmith deck and memory cue support"
-# Verify the destination, branch and commit before an explicit human upload.
+# Verify the destination, branch and commit before the authorized upload.
 test "$(git remote get-url --push personal-experimental)" = "https://github.com/Kybernetria/mixxx.git"
 test "$(git branch --show-current)" = "local/signalsmith-memory-cues"
 git push --set-upstream personal-experimental HEAD:refs/heads/local/signalsmith-memory-cues
 ```
 
-A push only uploads the branch. It does not open a PR, trigger a release, or
-assert readiness. CI execution, artifact review, and any later human DJ
-validation are separate. **End of AI-generated documentation.**
+A push uploads the branch and may trigger configured branch CI. It does not
+open a PR, publish a release, or assert readiness. Hosted CI results, artifact
+review, and human DJ validation are separate. **End of AI-generated documentation.**

@@ -9,21 +9,21 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <thread>
 #include <vector>
 
 #include "engine/readaheadmanager.h"
+#include "engine/stretchinputbounds.h"
 #include "util/defs.h"
 #include "util/fpclassify.h"
 #include "util/sample.h"
 
 namespace {
 constexpr int kOutputFrames = 256;
-constexpr int kInputFrames = MAX_BUFFER_LEN;
-// Covers maximum engine buffers, supported resampling ratios and 150-frame
-// audible loops, without treating normal positive short reads as starvation.
-constexpr int kReadBudget = 4096;
-constexpr int kZeroReadBudget = 64;
+constexpr int kInputFrames = mixxx::engine::stretch::kMaxInputFrames;
+constexpr int kReadBudget = mixxx::engine::stretch::kReadAttemptBudget;
+constexpr int kZeroReadBudget = mixxx::engine::stretch::kZeroReadAttemptBudget;
 
 std::uint64_t formatKey(const mixxx::audio::SignalInfo& signal) {
     return signal.isValid()
@@ -115,23 +115,59 @@ struct EngineBufferScaleSignalsmith::State {
         }
     }
 
-    bool adopt() {
-        const auto key = requested.load(std::memory_order_relaxed);
-        if (!retired.load(std::memory_order_acquire)) {
-            if (auto* config = ready.exchange(nullptr, std::memory_order_acq_rel)) {
-                if (config->key != key || (active && active->key == key)) {
-                    retired.store(config, std::memory_order_release);
-                } else {
-                    auto* previous = active;
-                    active = config;
-                    adopted.store(key, std::memory_order_release);
-                    pending = false;
-                    availableOutput = 0;
-                    retired.store(previous, std::memory_order_release);
+    struct PendingInputBatch {
+        double rate;
+        double pitch;
+        int outputFrames;
+        int inputRequired;
+        int collected;
+        double resultFraction;
+    };
+
+    bool acceptAndAdoptForCallback() {
+        if (auto* completed = seekCompleted.exchange(nullptr, std::memory_order_acq_rel)) {
+            seekOutstanding = false;
+            const auto key = requested.load(std::memory_order_acquire);
+            if (completed->key == key &&
+                    completed->seekGeneration == generation.load(std::memory_order_acquire)) {
+                active = completed;
+                needsPreroll = false;
+                resuming = true;
+                availableOutput = 0;
+                fraction = 0;
+            } else if (completed->key == key) {
+                active = completed;
+                needsPreroll = true;
+                pending.reset();
+                availableOutput = 0;
+            } else {
+                if (retired.load(std::memory_order_acquire)) {
+                    seekCompleted.store(completed, std::memory_order_release);
+                    seekOutstanding = true;
+                    return false;
+                }
+                retired.store(completed, std::memory_order_release);
+                adopted.store(0, std::memory_order_release);
+            }
+        }
+        if (!seekOutstanding) {
+            const auto key = requested.load(std::memory_order_relaxed);
+            if (!retired.load(std::memory_order_acquire)) {
+                if (auto* config = ready.exchange(nullptr, std::memory_order_acq_rel)) {
+                    if (config->key != key || (active && active->key == key)) {
+                        retired.store(config, std::memory_order_release);
+                    } else {
+                        auto* previous = active;
+                        active = config;
+                        adopted.store(key, std::memory_order_release);
+                        pending.reset();
+                        availableOutput = 0;
+                        retired.store(previous, std::memory_order_release);
+                    }
                 }
             }
         }
-        return active && active->key == key;
+        return active && active->key == requested.load(std::memory_order_acquire);
     }
 
     // All following state belongs exclusively to the callback.
@@ -139,16 +175,11 @@ struct EngineBufferScaleSignalsmith::State {
     Configuration* active = nullptr;
     bool needsPreroll = true;
     bool seekOutstanding = false;
-    bool pending = false;
+    std::optional<PendingInputBatch> pending;
     bool backwards = false;
-    int requiredInput = 0;
-    int collectedInput = 0;
     int availableOutput = 0;
     int outputOffset = 0;
     double fraction = 0;
-    double pendingFraction = 0;
-    double pendingRate = 0;
-    double pendingPitch = 1;
     double outputRate = 0;
     bool resuming = false;
 
@@ -227,7 +258,7 @@ void EngineBufferScaleSignalsmith::clear() {
     auto& state = *m_state;
     state.generation.fetch_add(1, std::memory_order_acq_rel);
     state.needsPreroll = true;
-    state.pending = false;
+    state.pending.reset();
     state.availableOutput = 0;
     state.fraction = 0;
     state.resuming = false;
@@ -238,35 +269,7 @@ double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) 
         return 0;
     SampleUtil::clear(output, samples);
     auto& state = *m_state;
-    if (auto* completed = state.seekCompleted.exchange(nullptr, std::memory_order_acq_rel)) {
-        state.seekOutstanding = false;
-        if (completed->key == state.requested.load(std::memory_order_acquire) &&
-                completed->seekGeneration == state.generation.load(std::memory_order_acquire)) {
-            state.active = completed;
-            state.needsPreroll = false;
-            state.resuming = true;
-            state.availableOutput = 0;
-            state.fraction = 0;
-        } else if (completed->key == state.requested.load(std::memory_order_acquire)) {
-            // Same-format cancellation: retain the configuration, discard its stale state.
-            state.active = completed;
-            state.needsPreroll = true;
-            state.pending = false;
-            state.collectedInput = 0;
-            state.availableOutput = 0;
-        } else {
-            if (!state.retired.load(std::memory_order_acquire)) {
-                state.retired.store(completed, std::memory_order_release);
-            } else {
-                // Keep completion ownership until a retirement slot is available.
-                state.seekCompleted.store(completed, std::memory_order_release);
-                state.seekOutstanding = true;
-                return 0;
-            }
-            state.adopted.store(0, std::memory_order_release);
-        }
-    }
-    if (state.seekOutstanding || !state.adopt() || samples <= 0 || m_effectiveRate <= 0) {
+    if (!state.acceptAndAdoptForCallback() || samples <= 0 || m_effectiveRate <= 0) {
         return 0;
     }
     auto& config = *state.active;
@@ -302,30 +305,30 @@ double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) 
             continue;
         }
         if (!state.pending) {
-            state.pendingRate = m_effectiveRate;
-            state.pendingPitch = m_dBaseRate * m_dPitchRatio;
+            const double rate = m_effectiveRate;
+            const double pitch = m_dBaseRate * m_dPitchRatio;
             const double required = state.needsPreroll
-                    ? config.stretch.inputLatency() +
-                            state.pendingRate * config.stretch.outputLatency()
-                    : state.pendingRate * kOutputFrames + state.fraction;
+                    ? config.stretch.inputLatency() + rate * config.stretch.outputLatency()
+                    : rate * kOutputFrames + state.fraction;
             if (!util_isfinite(required) || required > kInputFrames) {
                 break;
             }
-            state.requiredInput = static_cast<int>(required);
-            state.pendingFraction = state.needsPreroll ? state.fraction
-                                                       : required - state.requiredInput;
-            state.collectedInput = 0;
-            state.pending = true;
+            const int inputRequired = static_cast<int>(required);
+            state.pending.emplace(State::PendingInputBatch{rate,
+                    pitch,
+                    state.needsPreroll ? 0 : kOutputFrames,
+                    inputRequired,
+                    0,
+                    state.needsPreroll ? state.fraction : required - inputRequired});
         }
-        // Freeze request parameters across misses. New parameters take effect
-        // after this block and its output are delivered, never by discarding input.
-        while (state.collectedInput < state.requiredInput && reads < kReadBudget &&
+        auto& batch = *state.pending;
+        while (batch.collected < batch.inputRequired && reads < kReadBudget &&
                 zeroReads < kZeroReadBudget) {
             ++reads;
             const auto result = state.reader->getNextSamplesForStretch(
-                    state.backwards ? -state.pendingRate : state.pendingRate,
+                    state.backwards ? -batch.rate : batch.rate,
                     config.interleaved.data(),
-                    (state.requiredInput - state.collectedInput) * channels,
+                    (batch.inputRequired - batch.collected) * channels,
                     getOutputSignal().getChannelCount());
             if (result.unavailable) {
                 state.resuming = true;
@@ -336,39 +339,39 @@ double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) 
                 ++zeroReads;
             for (int frame = 0; frame < readFrames; ++frame) {
                 for (int ch = 0; ch < channels; ++ch) {
-                    config.inputPointers[ch][state.collectedInput + frame] =
+                    config.inputPointers[ch][batch.collected + frame] =
                             config.interleaved[frame * channels + ch];
                 }
             }
-            state.collectedInput += readFrames;
+            batch.collected += readFrames;
         }
-        if (state.collectedInput < state.requiredInput) {
+        if (batch.collected < batch.inputRequired) {
             // Zero-length loop transitions are allowed, but recovery is bounded.
             break;
         }
         if (state.needsPreroll) {
             config.seekGeneration = state.generation.load(std::memory_order_acquire);
-            config.seekFrames = state.requiredInput;
-            config.seekPitch = state.pendingPitch;
+            config.seekFrames = batch.inputRequired;
+            config.seekPitch = batch.pitch;
             state.active = nullptr;
             state.seekOutstanding = true;
             state.needsPreroll = false;
-            state.pending = false;
+            state.pending.reset();
             state.seekRequest.store(&config, std::memory_order_release);
             return consumedFrames;
         } else {
-            config.stretch.setTransposeFactor(state.pendingPitch);
+            config.stretch.setTransposeFactor(batch.pitch);
             config.stretch.setFormantFactor(1);
             config.stretch.process(config.inputPointers.data(),
-                    state.requiredInput,
+                    batch.inputRequired,
                     config.outputPointers.data(),
-                    kOutputFrames);
-            state.outputRate = state.pendingRate;
+                    batch.outputFrames);
+            state.outputRate = batch.rate;
             state.outputOffset = 0;
-            state.availableOutput = kOutputFrames;
-            state.fraction = state.pendingFraction;
+            state.availableOutput = batch.outputFrames;
+            state.fraction = batch.resultFraction;
         }
-        state.pending = false;
+        state.pending.reset();
     }
     return consumedFrames;
 }

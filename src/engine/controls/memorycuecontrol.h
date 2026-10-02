@@ -14,6 +14,12 @@
 
 /// Commands carry last-published engine-frame positions, not worker-time
 /// positions. Mutations are serialized on this QObject's (GUI) thread.
+/// The owner must stop and join audio, reader-worker, controller and other
+/// emitters, and quiesce direct enqueue callers before destruction. Destroy on
+/// the GUI thread, serialized with GUI dispatch, never on the audio callback.
+/// The signal-entry gate protects command storage from already-entered functors;
+/// it does not protect preceding ControlObject QObject forwarding or permit
+/// concurrent QObject destruction while emitters are running.
 class MemoryCueControl final : public EngineControl {
     Q_OBJECT
   public:
@@ -44,6 +50,19 @@ class MemoryCueControl final : public EngineControl {
 
   private:
     void reclaimNavigationSnapshots(); // GUI only
+    struct ButtonBinding {
+        const char* key;
+        Operation operation;
+    };
+    static constexpr std::array kButtonBindings{
+            ButtonBinding{"memory_cue_set", Operation::Create},
+            ButtonBinding{"memory_cue_next", Operation::Next},
+            ButtonBinding{"memory_cue_prev", Operation::Previous},
+            ButtonBinding{"memory_cue_clear", Operation::ClearCurrent},
+            ButtonBinding{"memory_cue_clear_nearest", Operation::ClearNearest},
+            ButtonBinding{"memory_cue_clear_prev", Operation::ClearPrevious},
+            ButtonBinding{"memory_cue_clear_next", Operation::ClearNext},
+            ButtonBinding{"memory_cue_clear_all", Operation::ClearAll}};
     struct Position {
         mixxx::audio::FramePos position{};
         mixxx::audio::FramePos closestBeat{};
@@ -66,7 +85,7 @@ class MemoryCueControl final : public EngineControl {
         const std::uint64_t seekEpoch;
         const std::uint64_t navigationEpoch;
         const std::uint64_t cueRevision;
-        const std::shared_ptr<std::atomic<std::uint64_t>> revisionToken;
+        const std::shared_ptr<const std::atomic<std::uint64_t>> revisionToken;
     };
     static constexpr std::size_t kCapacity = 64;
     struct InputCallbackState {
@@ -79,7 +98,8 @@ class MemoryCueControl final : public EngineControl {
     static_assert(std::atomic<MemoryCueControl*>::is_always_lock_free &&
             std::atomic<unsigned>::is_always_lock_free &&
             std::atomic<NavigationSnapshot*>::is_always_lock_free);
-    // Signal functors may still be executing after QObject disconnection.
+    // Retain entry-state storage across functor execution after disconnection.
+    // This does not replace the owner's emitter-quiescence requirement.
     const std::shared_ptr<InputCallbackState> m_inputCallbacks{
             std::make_shared<InputCallbackState>(this)};
     std::array<Slot, kCapacity> m_commands;
@@ -98,6 +118,6 @@ class MemoryCueControl final : public EngineControl {
     QTimer m_timer;
     PollingControlProxy m_quantize;
     PollingControlProxy m_closestBeat;
-    std::array<std::unique_ptr<ControlPushButton>, 8> m_buttons;
+    std::array<std::unique_ptr<ControlPushButton>, kButtonBindings.size()> m_buttons;
     std::unique_ptr<ControlObject> m_overflowControl;
 };

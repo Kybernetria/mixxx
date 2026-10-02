@@ -5,6 +5,7 @@
 
 #include "audio/frame.h"
 #include "engine/cachingreader/cachingreader.h"
+#include "engine/stretchinputbounds.h"
 #include "util/math.h"
 #include "util/types.h"
 
@@ -81,6 +82,8 @@ class ReadAheadManager {
             mixxx::audio::ChannelCount channelCount);
 
   private:
+    friend class ReadAheadManagerTest;
+
     SINT readNextSamples(double rate,
             CSAMPLE* buffer,
             SINT requestedSamples,
@@ -148,10 +151,16 @@ class ReadAheadManager {
     LoopingControl* m_pLoopingControl;
     CueControl* m_pCueControl;
     RateControl* m_pRateControl;
-    // Enough entries for two maximum-sized outstanding input batches even
-    // when every source frame crosses a loop boundary. Storage is allocated
-    // during reader construction, never by read/log consumption in a callback.
-    static constexpr std::size_t kReadLogCapacity = 320002;
+    // Preserve the bounded storage policy: two maximum input batches plus two
+    // endpoint entries, allocated at construction. Positive-length entries
+    // represent at least one source frame; fractional consumption can retain a
+    // partial leading entry. Zero-length loop transitions add entries without
+    // input progress and can accumulate across refills. Caller-side consumption
+    // happens after scaleBuffer returns, so this sizing does not prove that every
+    // reachable sequence fits. Saturation refuses transactional reads until log
+    // consumption or a seek reset frees space; it does not guarantee progress.
+    static constexpr std::size_t kReadLogCapacity =
+            std::size_t{2} * mixxx::engine::stretch::kMaxInputFrames + 2;
     std::unique_ptr<ReadLogEntry[]> m_readAheadLog{
             std::make_unique<ReadLogEntry[]>(kReadLogCapacity)};
     std::size_t m_readLogStart = 0;

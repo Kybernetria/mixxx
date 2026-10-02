@@ -101,6 +101,10 @@ class EngineBuffer : public EngineObject {
             EngineChannel* pChannel,
             EngineMixer* pMixingEngine,
             mixxx::audio::ChannelCount maxSupportedChannel);
+    /// Owner must stop audio callbacks and controller/other control emitters
+    /// before destruction, off callback and serialized with GUI dispatch.
+    /// Destruction joins the owned CachingReader before deleting engine controls.
+    /// MemoryCueControl's entry gate does not protect QObject signal forwarding.
     virtual ~EngineBuffer();
 
     void bindWorkers(EngineWorkerScheduler* pWorkerScheduler);

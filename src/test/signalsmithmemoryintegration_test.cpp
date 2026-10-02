@@ -326,6 +326,23 @@ TEST_F(SignalsmithMemoryIntegrationTest, CreationUsesPositionBeforeQueuedSeek) {
     ASSERT_TRUE(MemoryCues::current(*track, FramePos(1000)));
 }
 
+TEST_F(SignalsmithMemoryIntegrationTest, PublicNextAndPreviousControlsKeepTheirDirections) {
+    const auto track = engine()->getLoadedTrack();
+    MemoryCues::removeAll(*track);
+    MemoryCues::create(*track, FramePos(500));
+    MemoryCues::create(*track, FramePos(5000));
+    for (const auto& [key, target] :
+            {std::pair{"memory_cue_next", FramePos(5000)},
+                    std::pair{"memory_cue_prev", FramePos(500)}}) {
+        press(key);
+        QTest::qWait(8);
+        process();
+        EXPECT_EQ(target, engine()->queuedSeekPosition());
+        process();
+        EXPECT_EQ(target, engine()->getExactPlayPos());
+    }
+}
+
 TEST_F(SignalsmithMemoryIntegrationTest, NavigationWorksAndExplicitSeekRejectsPublishedTarget) {
     const auto track = engine()->getLoadedTrack();
     MemoryCues::removeAll(*track);

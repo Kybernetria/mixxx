@@ -29,6 +29,48 @@ class MemoryCueControlTest : public MixxxTest {
     }
 };
 
+TEST_F(MemoryCueControlTest, PublicCreateControlCapturesCommandTimePosition) {
+    ControlProxy button(kMemoryGroup, QStringLiteral("memory_cue_set"));
+    button.set(1);
+    publish(2000);
+    control.drainCommands();
+    ASSERT_EQ(1, track->getCuePoints().size());
+    EXPECT_EQ(1000, track->getCuePoints().first()->getPosition().value());
+}
+
+TEST_F(MemoryCueControlTest, PublicDeletionControlsKeepTheirDistinctOperations) {
+    struct Case {
+        const char* key;
+        double position;
+        bool removesAll;
+    };
+    for (const auto& testCase : {Case{"memory_cue_clear", 20000, false},
+                 Case{"memory_cue_clear_nearest", 20500, false},
+                 Case{"memory_cue_clear_prev", 25000, false},
+                 Case{"memory_cue_clear_next", 15000, false},
+                 Case{"memory_cue_clear_all", 20000, true}}) {
+        SCOPED_TRACE(testCase.key);
+        MemoryCues::removeAll(*track);
+        const auto first = MemoryCues::create(*track, mixxx::audio::FramePos(10000));
+        const auto middle = MemoryCues::create(*track, mixxx::audio::FramePos(20000));
+        const auto last = MemoryCues::create(*track, mixxx::audio::FramePos(30000));
+        publish(testCase.position);
+        ControlProxy button(kMemoryGroup, QString::fromLatin1(testCase.key));
+        button.set(0);
+        button.set(1);
+        control.drainCommands();
+        const auto cues = track->getCuePoints();
+        EXPECT_FALSE(cues.contains(middle));
+        if (testCase.removesAll) {
+            EXPECT_TRUE(cues.isEmpty());
+        } else {
+            ASSERT_EQ(2, cues.size());
+            EXPECT_TRUE(cues.contains(first));
+            EXPECT_TRUE(cues.contains(last));
+        }
+    }
+}
+
 TEST_F(MemoryCueControlTest, CreateCapturesCommandTimePosition) {
     control.enqueue(MemoryCueControl::Operation::Create);
     publish(2000);

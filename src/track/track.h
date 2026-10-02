@@ -351,7 +351,7 @@ class Track : public QObject {
     void removeCue(const CuePointer& pCue);
     void removeCuesOfType(mixxx::CueType);
     void removeTempLoopCue();
-    std::shared_ptr<std::atomic<std::uint64_t>> cueRevisionToken() const {
+    std::shared_ptr<const std::atomic<std::uint64_t>> cueRevisionToken() const {
         return m_cueRevision;
     }
     QList<CuePointer> getCuePoints() const {
@@ -560,6 +560,10 @@ class Track : public QObject {
     /// Sets cue points and returns a boolean to indicate if cues were updated.
     /// Only supposed to be called while the caller guards this a lock.
     bool setCuePointsWhileLocked(const QList<CuePointer>& cuePoints);
+    void attachCueRevisionToken(const CuePointer& cue);
+    void detachCueRevisionToken(const CuePointer& cue);
+    void initializeUnpublishedCueRevisionToken(Cue& cue);
+    void advanceCueRevision();
 
     /// Imports pending cues from a CueInfoImporter and returns a boolean to
     /// indicate if cues were updated. Only supposed to be called while the

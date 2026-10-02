@@ -151,6 +151,19 @@ class ReadAheadManagerTest : public MixxxTest {
     QScopedPointer<StubLoopControl> m_pLoopControl;
     QScopedPointer<StubCueControl> m_pCueControl;
     QScopedPointer<ReadAheadManager> m_pReadAheadManager;
+
+    void fillReadLogWithZeroLengthEntries() {
+        for (std::size_t i = 0; i < ReadAheadManager::kReadLogCapacity; ++i) {
+            const double position = static_cast<double>(i) * 2;
+            m_pReadAheadManager->addReadLogEntry(position, position);
+        }
+    }
+    std::size_t readLogSize() const {
+        return m_pReadAheadManager->m_readLogSize;
+    }
+    std::size_t readLogCapacity() const {
+        return ReadAheadManager::kReadLogCapacity;
+    }
 };
 
 TEST_F(ReadAheadManagerTest, StretchChunkBoundaryAndMissAreTransactional) {
@@ -178,6 +191,25 @@ TEST_F(ReadAheadManagerTest, StretchChunkBoundaryAndMissAreTransactional) {
     EXPECT_FALSE(retry.unavailable);
     EXPECT_EQ(1024, retry.samplesRead);
     EXPECT_EQ(boundary + 1024, m_pReadAheadManager->getFilePlaypositionFromLog(boundary, 1024));
+}
+
+TEST_F(ReadAheadManagerTest, ReadLogCapacityGuardsZeroLengthEntrySaturationAndRecovers) {
+    fillReadLogWithZeroLengthEntries();
+    ASSERT_EQ(readLogCapacity(), readLogSize());
+    const auto saturated = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 2, mixxx::audio::ChannelCount::stereo());
+    EXPECT_TRUE(saturated.unavailable);
+    EXPECT_EQ(0, saturated.samplesRead);
+
+    EXPECT_EQ(static_cast<double>(readLogCapacity() - 1) * 2,
+            m_pReadAheadManager->getFilePlaypositionFromLog(0, 1));
+    EXPECT_EQ(0u, readLogSize());
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    const auto recovered = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 2, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(recovered.unavailable);
+    EXPECT_EQ(2, recovered.samplesRead);
 }
 
 TEST_F(ReadAheadManagerTest, StretchReverseStopsAtCacheBoundary) {

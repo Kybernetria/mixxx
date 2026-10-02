@@ -201,6 +201,20 @@ TEST_F(EngineBufferScaleSignalsmithTest, PendingParametersAreFrozenUntilDelivere
     EXPECT_EQ(320, scaleEventually(output.data(), output.size()));
 }
 
+TEST_F(EngineBufferScaleSignalsmithTest, PartialOrdinaryBatchKeepsCapturedParameters) {
+    ready();
+    std::array<float, 512> output{};
+    ASSERT_EQ(256, scaleEventually(output.data(), output.size()));
+    reader.maxFrames = 128;
+    reader.missOnCall = reader.calls + 2;
+    EXPECT_EQ(0, scaler.scaleBuffer(output.data(), output.size()));
+    double tempo = 1.25;
+    double pitch = 1.1;
+    scaler.setScaleParameters(1, &tempo, &pitch);
+    reader.missOnCall = -1;
+    EXPECT_EQ(256, scaleEventually(output.data(), output.size()));
+}
+
 TEST_F(EngineBufferScaleSignalsmithTest, SeekCancelsObsoletePrefix) {
     ready();
     reader.maxFrames = 512;

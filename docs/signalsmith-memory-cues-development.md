@@ -7,11 +7,13 @@
 > removed: Queen Mary analysis is used, with SoundTouch retained only as a
 > historical plugin fallback that preserves existing valid beat grids; analysis
 > is not forced and explicit import preferences remain. Historical failed gates
-> and results below are preserved as history, not masked. Local final validation
-> is pending actual host results; no unreported passes are claimed. **End of
+> and results below are preserved as history, not masked. Software validation
+> checkpoints are recorded below; no unreported passes are claimed. **End of
 > AI-generated current-scope notice.**
 
-No commits or upstream submissions are authorized.
+The user has authorized commits and an ordinary push to the dedicated personal
+branch after local validation and review. Upstream submissions and releases are
+not authorized.
 
 ## Human listening checklist
 
@@ -371,6 +373,89 @@ New audio renders, executables, logs and generated CSVs are not added to Git.
 Earlier 1,366-test/65-test checkpoints and synchronous seek failures above are
 historical, not substituted for these results. PitchShift migration/latency work
 is intentionally archived and out of scope, not a remaining completion gate.
-The fork remote is approved and configured; no commit, push, hosted CI run,
-release or upstream message has been made. Human headphones/DJ checks in the
-checklist remain outstanding. **End of AI-generated documentation.**
+At this checkpoint the fork remote was approved and configured but no commit,
+push, hosted CI run, release or upstream message had been made. The user later
+authorized committing and pushing the implementation and the focused refactor
+below. Human headphones/DJ checks remain outstanding.
+
+## Focused maintainability refactor
+
+An architect assessed the review proposals; a read-only reviewer examined the
+before/after refactor patch and found no actionable defect. Changes are limited
+to the following invariants and their regression tests:
+
+- Callback configuration completion/adoption/retirement now has one operation;
+  a small value groups the frozen rate, pitch, input prefix and output batch.
+  Mailboxes, exclusive worker loans, retirement backpressure and reset semantics
+  are unchanged. No asynchronous-job framework was introduced.
+- The shared stretch-input frame bound derives reader capacity as
+  `2 * MAX_BUFFER_LEN + 2`, still **320,002** preallocated entries. Total attempts
+  remain **4,096**, successful zero-length reads **64** per callback. Zero-length
+  loop transitions can accumulate across refills before caller-side consumption;
+  this is a bounded storage policy, **not** a universal non-saturation proof.
+  Existing refusal/reset behavior is retained rather than changing limits.
+- Private Track helpers own revision-token attachment, detachment, unpublished
+  initialization and revision advancement. Navigation receives a read-only
+  atomic token handle. Shared/duplicate membership, dirty signals, lock order
+  and conservative label/color invalidation retain their previous semantics.
+- Eight explicit `{key, operation}` bindings replace enum-position coupling;
+  button storage derives from that mapping. Tests press all public controls.
+
+### Owner-facing shutdown contract
+
+`MemoryCueControl` and `EngineBuffer` document a mandatory precondition:
+stop and quiesce audio callbacks, controller/other emitters, reader-worker entry
+and direct enqueue callers before owned controls are destroyed. Destruction is
+off callback, on the GUI thread and serialized with GUI dispatch. CoreServices
+stops SoundManager and ControllerManager before EngineMixer; EngineBuffer joins
+its owned CachingReader before deleting controls.
+
+The entry gate remains additional protection for already-entered signal functors
+accessing command storage. It **does not** protect the preceding ControlObject
+QObject forwarding, direct calls that bypass the gate, or arbitrary concurrent
+QObject destruction. Existing joined-emitter and concurrent-external-cue-edit
+teardown tests keep those guarantees distinct.
+
+### Post-refactor validation (2026-10-02)
+
+- Full Debug CTest: **1,389 successful**, 241.26 seconds.
+- Full Release CTest: **1,389 successful**, 238.78 seconds.
+- Focused ASan/UBSan including DAO grid tests: **102 passed**, 116.13 seconds,
+  with leak detection enabled and no reported sanitizer error.
+- The opt-in workload is skipped in normal full-suite runs; 38 upstream-disabled
+  tests remain disabled. Workloads below were explicitly enabled separately.
+
+Repeated the same **108 quiet runs / 108,000 callbacks** across both build types,
+three buffer sizes, steady/one-deck/all-deck seeking, effects off/on and three
+repetitions. Unlike the earlier checkpoint, this run recorded **one overrun**:
+Debug, effects off, 128 interleaved samples, only deck 1 seeking, repetition 1.
+The maximum callback was **1,692.35 µs**, exceeding the **1,451.25 µs** software
+budget. The original observation remains part of the result.
+
+| Interleaved samples | p99 range | Maximum callback | Maximum seek-output proxy |
+| --- | --- | --- | --- |
+| 128 | 428.61–800.18 µs | 1,692.35 µs | 6.70 ms |
+| 512 | 805.81–992.53 µs | 1,423.21 µs | 6.98 ms |
+| 1,024 | 1,408.53–1,764.17 µs | 2,261.59 µs | 13.28 ms |
+
+There were no steady stalls/silent buffers, no unaffected-deck stalls/silence
+when only deck 1 sought, and no canceled or unfinished seeks. Seeking-deck
+preparation stalls are intentional. Six additional runs per build type repeated
+the smallest-buffer, effects-off, one-deck-seek case: **zero overruns / 12,000
+callbacks**, maxima **558.37–944.15 µs**. This diagnostic did not reproduce the
+outlier; it neither erases it nor establishes its cause. Results do not establish
+a timing improvement or regression caused by the refactor, or device readiness.
+The earlier latency-proxy, allocator instrumentation and hardware caveats apply.
+
+Logs: `/tmp/mixxx-taste-{debug,release}-full.log`,
+`/tmp/mixxx-taste-sanitizers-tests.log` and `/tmp/mixxx-taste-workloads/`;
+`results.csv` records the original 108-run matrix, with the twelve diagnostic
+runs kept separately as `*diagnostic*.log`. Reproduce using the checked-in
+workload and the configuration matrix above. No logs, rendered media, generated
+CSV or executables are included in the commits.
+
+The implementation and focused refactor are prepared as separate buildable
+commits, followed only by the authorized ordinary push to the dedicated personal
+branch. Existing fork branches and official upstream are untouched; no release,
+PR or upstream message is part of this operation.
+**End of AI-generated documentation.**
