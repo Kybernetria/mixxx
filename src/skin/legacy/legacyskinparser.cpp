@@ -59,6 +59,7 @@
 #include "widget/wlabel.h"
 #include "widget/wlibrary.h"
 #include "widget/wlibrarysidebar.h"
+#include "widget/wmemorycuebutton.h"
 #include "widget/wnumber.h"
 #include "widget/wnumberdb.h"
 #include "widget/wnumberpos.h"
@@ -555,6 +556,8 @@ QList<QWidget*> LegacySkinParser::parseNode(const QDomElement& node) {
         result = wrapWidget(parseCueButton(node));
     } else if (nodeName == "EffectPushButton") {
         result = wrapWidget(parseEffectPushButton(node));
+    } else if (nodeName == "MemoryCueButton") {
+        result = wrapWidget(parseMemoryCueButton(node));
     } else if (nodeName == "HotcueButton") {
         result = wrapWidget(parseHotcueButton(node));
     } else if (nodeName == "ComboBox") {
@@ -1991,6 +1994,14 @@ QWidget* LegacySkinParser::parseHotcueButton(const QDomElement& element) {
 
     pWidget->Init();
     return pWidget;
+}
+
+QWidget* LegacySkinParser::parseMemoryCueButton(const QDomElement& element) {
+    auto widget = make_parented<WMemoryCueButton>(m_pParent, lookupNodeGroup(element));
+    commonWidgetSetup(element, widget.get());
+    widget->setup(element, *m_pContext);
+    widget->Init();
+    return widget.get();
 }
 
 QWidget* LegacySkinParser::parsePlayButton(const QDomElement& element) {

@@ -13,6 +13,7 @@ void assertEndPosition(
     switch (type) {
     case CueType::HotCue:
     case CueType::MainCue:
+    case CueType::Memory:
         DEBUG_ASSERT(!endPositionMillis);
         break;
     case CueType::Loop:
@@ -126,6 +127,9 @@ QDebug operator<<(QDebug debug, const CueType& cueType) {
         break;
     case CueType::HotCue:
         debug << "CueType::HotCue";
+        break;
+    case CueType::Memory:
+        debug << "CueType::Memory";
         break;
     case CueType::MainCue:
         debug << "CueType::MainCue";

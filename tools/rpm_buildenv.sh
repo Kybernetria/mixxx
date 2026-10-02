@@ -65,7 +65,6 @@ case "$1" in
             qt6-qt{5compat,base,base-private,declarative,multimedia,shadertools,svg}-devel \
             qtkeychain-qt6-devel \
             rubberband-devel \
-            soundtouch-devel \
             sqlite-devel \
             taglib-devel \
             upower-devel \

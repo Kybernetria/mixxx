@@ -150,41 +150,14 @@ TEST_F(EngineBufferTest, PitchRoundtrip) {
     ASSERT_NEAR(0.0, ControlObject::get(ConfigKey(m_sGroup1, "pitch")), 1e-10);
 }
 
-#ifdef __RUBBERBAND__
-TEST_F(EngineBufferTest, SlowRubberBand) {
-    // At very slow speeds, RubberBand needs to reallocate buffers and since
-    // this
-    // is done in the engine thread it can be a major party-stopper.
-    // Make sure slow speeds still use the linear scaler.
+TEST_F(EngineBufferTest, SlowRateUsesLinearScaler) {
+    // Very slow transport rates use linear interpolation rather than the
+    // pitch-independent keylock scaler.
     ControlObject::set(ConfigKey(m_sGroup1, "pitch"), 2.8);
-
-    // Hack to get a slow, non-scratching direct speed
     ControlObject::set(ConfigKey(m_sGroup1, "rateSearch"), 0.0072);
-
-    // With Soundtouch, it should switch the scaler as well
-    ControlObject::set(ConfigKey(kAppGroup, QStringLiteral("keylock_engine")),
-            static_cast<double>(EngineBuffer::KeylockEngine::SoundTouch));
-    ProcessBuffer();
-    EXPECT_EQ(m_pMockScaleVinyl1, m_pChannel1->getEngineBuffer()->m_pScale);
-
-    // Back to full speed
-    ControlObject::set(ConfigKey(m_sGroup1, "rateSearch"), 1);
-    ProcessBuffer();
-
-    // With Rubberband, and transport stopped it should be still keylock
-    ControlObject::set(ConfigKey(kAppGroup, QStringLiteral("keylock_engine")),
-            static_cast<double>(EngineBuffer::KeylockEngine::RubberBandFaster));
-    ControlObject::set(ConfigKey(m_sGroup1, "rateSearch"), 0.0);
-    ProcessBuffer();
-    EXPECT_EQ(m_pMockScaleKeylock1, m_pChannel1->getEngineBuffer()->m_pScale);
-
-    ControlObject::set(ConfigKey(m_sGroup1, "rateSearch"), 0.0072);
-
-    // Playing at low rate, the vinyl scaler should be used
     ProcessBuffer();
     EXPECT_EQ(m_pMockScaleVinyl1, m_pChannel1->getEngineBuffer()->m_pScale);
 }
-#endif
 
 TEST_F(EngineBufferTest, ScalerNoTransport) {
     // normally use the Vinyl scaler

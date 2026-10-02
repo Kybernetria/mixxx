@@ -1,0 +1,202 @@
+name: Experimental Linux (personal fork)
+
+on:
+  push:
+    branches:
+      - local/signalsmith-memory-cues
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: experimental-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug-tests:
+    if: github.repository_owner != 'mixxxdj' && github.event.repository.fork == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Linux build dependencies
+        run: |
+          tools/debian_buildenv.sh setup
+          sudo apt-get install -y --no-install-recommends qml6-module-qtcore qml6-module-qtqml
+      - name: Configure Debug
+        run: >-
+          cmake -S . -B build-experimental-debug
+          -DCMAKE_BUILD_TYPE=Debug
+          -DQT6=ON -DQML=ON -DBULK=ON -DFFMPEG=ON
+          -DLOCALECOMPARE=ON -DMAD=ON -DMODPLUG=ON -DWAVPACK=ON
+          -DINSTALL_USER_UDEV_RULES=OFF
+          -DBUILD_TESTING=ON -DBUILD_BENCH=OFF
+      - name: Build Debug
+        run: cmake --build build-experimental-debug --parallel 2
+      - name: Run full Debug test suite
+        env:
+          HOME: ${{ runner.temp }}/experimental-home-debug
+          XDG_CONFIG_HOME: ${{ runner.temp }}/experimental-home-debug/config
+          XDG_CACHE_HOME: ${{ runner.temp }}/experimental-home-debug/cache
+          XDG_DATA_HOME: ${{ runner.temp }}/experimental-home-debug/data
+          XDG_STATE_HOME: ${{ runner.temp }}/experimental-home-debug/state
+          QT_QPA_PLATFORM: offscreen
+          CTEST_OUTPUT_ON_FAILURE: 1
+          CTEST_PARALLEL_LEVEL: 2
+          GTEST_COLOR: 1
+        run: |
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+          ctest --test-dir build-experimental-debug --output-on-failure --timeout 45 2>&1 | tee build-experimental-debug/ctest.log
+      - name: Upload Debug test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: experimental-debug-ctest-log
+          path: build-experimental-debug/ctest.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  release-package:
+    if: github.repository_owner != 'mixxxdj' && github.event.repository.fork == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Linux build dependencies
+        run: |
+          tools/debian_buildenv.sh setup
+          sudo apt-get install -y --no-install-recommends qml6-module-qtcore qml6-module-qtqml
+      - name: Configure Release
+        run: >-
+          cmake -S . -B build-experimental-release
+          -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          -DQT6=ON -DQML=ON -DBULK=ON -DFFMPEG=ON
+          -DLOCALECOMPARE=ON -DMAD=ON -DMODPLUG=ON -DWAVPACK=ON
+          -DINSTALL_USER_UDEV_RULES=OFF
+          -DBUILD_TESTING=ON -DBUILD_BENCH=OFF
+      - name: Build Release
+        run: cmake --build build-experimental-release --parallel 2
+      - name: Run full Release test suite
+        env:
+          HOME: ${{ runner.temp }}/experimental-home-release
+          XDG_CONFIG_HOME: ${{ runner.temp }}/experimental-home-release/config
+          XDG_CACHE_HOME: ${{ runner.temp }}/experimental-home-release/cache
+          XDG_DATA_HOME: ${{ runner.temp }}/experimental-home-release/data
+          XDG_STATE_HOME: ${{ runner.temp }}/experimental-home-release/state
+          QT_QPA_PLATFORM: offscreen
+          CTEST_OUTPUT_ON_FAILURE: 1
+          CTEST_PARALLEL_LEVEL: 2
+          GTEST_COLOR: 1
+        run: |
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+          ctest --test-dir build-experimental-release --output-on-failure --timeout 45 2>&1 | tee build-experimental-release/ctest.log
+      - name: Stage experimental install and archive
+        run: |
+          set -euo pipefail
+          stage="$PWD/build-experimental-release/stage"
+          mkdir -p "$stage"
+          DESTDIR="$stage" cmake --install build-experimental-release --prefix /usr
+          licenses="$stage/usr/share/doc/mixxx-experimental/licenses"
+          mkdir -p "$licenses/signalsmith-stretch" "$licenses/signalsmith-linear"
+          cp LICENSE "$licenses/MIXXX-LICENSE"
+          cp lib/signalsmith-stretch/LICENSE.txt "$licenses/signalsmith-stretch/"
+          cp lib/signalsmith-linear/LICENSE.txt "$licenses/signalsmith-linear/"
+          cp lib/signalsmith/PROVENANCE.md "$licenses/SIGNALSMITH-PROVENANCE.md"
+          cat > "$stage/EXPERIMENTAL-NOT-PORTABLE.txt" <<'EOF'
+          EXPERIMENTAL PERSONAL-FORK BUILD — NOT AN OFFICIAL MIXXX RELEASE
+          This Linux staged install is for evaluation only. It is not an AppImage,
+          portable bundle, supported distribution package, or performance claim.
+          Runtime dependencies and system integration are not bundled; install and
+          use only after reviewing the build provenance and licenses.
+          EOF
+          {
+            printf 'Repository: %s\n' "$GITHUB_REPOSITORY"
+            printf 'Commit: %s\n' "$(git rev-parse HEAD)"
+            printf 'Ref: %s\n' "$GITHUB_REF"
+            printf 'Run: %s\n' "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$stage/BUILD-PROVENANCE.txt"
+          tar -C "$stage" -czf build-experimental-release/mixxx-experimental-linux.tar.gz .
+          sha256sum build-experimental-release/mixxx-experimental-linux.tar.gz > build-experimental-release/mixxx-experimental-linux.tar.gz.sha256
+      - name: Upload experimental staged install
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: experimental-linux-staged-install
+          path: |
+            build-experimental-release/mixxx-experimental-linux.tar.gz
+            build-experimental-release/mixxx-experimental-linux.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Release test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: experimental-release-ctest-log
+          path: build-experimental-release/ctest.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  sanitizer-tests:
+    if: github.repository_owner != 'mixxxdj' && github.event.repository.fork == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Linux build dependencies
+        run: |
+          tools/debian_buildenv.sh setup
+          sudo apt-get install -y --no-install-recommends qml6-module-qtcore qml6-module-qtqml
+      - name: Configure AddressSanitizer and UndefinedBehaviorSanitizer
+        env:
+          CC: gcc
+          CXX: g++
+        run: >-
+          cmake -S . -B build-experimental-sanitizers
+          -DCMAKE_BUILD_TYPE=Debug
+          -DQT6=ON -DQML=ON -DBULK=ON -DFFMPEG=ON
+          -DLOCALECOMPARE=ON -DMAD=ON -DMODPLUG=ON -DWAVPACK=ON
+          -DINSTALL_USER_UDEV_RULES=OFF
+          -DBUILD_TESTING=ON -DBUILD_BENCH=OFF
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build sanitizer tests
+        run: cmake --build build-experimental-sanitizers --parallel 2
+      - name: Run full sanitizer test suite
+        env:
+          ASAN_OPTIONS: detect_leaks=1:fast_unwind_on_malloc=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          HOME: ${{ runner.temp }}/experimental-home-sanitizers
+          XDG_CONFIG_HOME: ${{ runner.temp }}/experimental-home-sanitizers/config
+          XDG_CACHE_HOME: ${{ runner.temp }}/experimental-home-sanitizers/cache
+          XDG_DATA_HOME: ${{ runner.temp }}/experimental-home-sanitizers/data
+          XDG_STATE_HOME: ${{ runner.temp }}/experimental-home-sanitizers/state
+          QT_QPA_PLATFORM: offscreen
+          CTEST_OUTPUT_ON_FAILURE: 1
+          CTEST_PARALLEL_LEVEL: 1
+          GTEST_COLOR: 1
+        run: |
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+          ctest --test-dir build-experimental-sanitizers --output-on-failure --timeout 90 2>&1 | tee build-experimental-sanitizers/ctest.log
+      - name: Upload sanitizer test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: experimental-sanitizer-ctest-log
+          path: build-experimental-sanitizers/ctest.log
+          if-no-files-found: ignore
+          retention-days: 14

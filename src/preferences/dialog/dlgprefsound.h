@@ -84,10 +84,6 @@ class DlgPrefSound : public DlgPreferencePage, public Ui::DlgPrefSoundDlg  {
     void deviceChannelsChanged();
     void configuredDeviceNotFound();
     void queryClicked();
-#ifdef __RUBBERBAND__
-    void updateKeylockDualThreadingCheckbox();
-    void updateKeylockMultithreading(bool enabled);
-#endif
     void addDevice(SoundDevicePointer pDevice);
     void removeDevice(SoundDevicePointer pDevice);
     void updateDeviceChannels(SoundDevicePointer pDevice);

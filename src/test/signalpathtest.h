@@ -28,10 +28,6 @@
 #include "util/defs.h"
 #include "util/sample.h"
 #include "util/types.h"
-#ifdef __RUBBERBAND__
-#include "engine/bufferscalers/rubberbandworkerpool.h"
-#endif
-
 using ::testing::Return;
 using ::testing::_;
 
@@ -141,15 +137,9 @@ class BaseSignalPathTest : public MixxxTest, SoundSourceProviderRegistration {
     ~BaseSignalPathTest() override = default;
 
     void SetUp() override {
-#ifdef __RUBBERBAND__
-        RubberBandWorkerPool::createInstance();
-#endif
     }
 
     void TearDown() override {
-#ifdef __RUBBERBAND__
-        RubberBandWorkerPool::destroy();
-#endif
     }
 
     void addDeck(EngineDeck* pDeck) {

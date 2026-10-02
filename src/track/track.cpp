@@ -111,6 +111,11 @@ Track::Track(
 }
 
 Track::~Track() {
+    // Keep m_cueRevision alive while detaching it from every cue.
+    const auto locked = lockMutex(&m_qMutex);
+    for (const auto& cue : std::as_const(m_cuePoints)) {
+        cue->detachRevisionToken(m_cueRevision);
+    }
     if (m_pBeatsImporterPending && !m_pBeatsImporterPending->isEmpty()) {
         kLogger.warning()
                 << "Import of beats is still pending and discarded";
@@ -967,15 +972,23 @@ void Track::setMainCuePosition(mixxx::audio::FramePos position) {
             // associated Cue objects should always live on the
             // same thread as their host, namely this->thread().
             pMainCue->moveToThread(thread());
+            // The new cue is unpublished, so initialize its primary token
+            // directly without taking its mutex.
+            pMainCue->m_revisionToken = m_cueRevision;
             connect(pMainCue.get(),
                     &Cue::updated,
                     this,
                     &Track::slotCueUpdated);
             m_cuePoints.push_back(pMainCue);
+            m_cueRevision->fetch_add(1, std::memory_order_release);
         }
     } else if (pMainCue) {
         disconnect(pMainCue.get(), nullptr, this, nullptr);
         m_cuePoints.removeOne(pMainCue);
+        if (!m_cuePoints.contains(pMainCue)) {
+            pMainCue->detachRevisionToken(m_cueRevision);
+        }
+        m_cueRevision->fetch_add(1, std::memory_order_release);
     }
 
     markDirtyAndUnlock(&locked);
@@ -1104,15 +1117,61 @@ CuePointer Track::createAndAddCue(
     // associated Cue objects should always live on the
     // same thread as their host, namely this->thread().
     pCue->moveToThread(thread());
+    auto locked = lockMutex(&m_qMutex);
+    // This cue has not been published to any other owner yet.
+    pCue->m_revisionToken = m_cueRevision;
     connect(pCue.get(),
             &Cue::updated,
             this,
             &Track::slotCueUpdated);
-    auto locked = lockMutex(&m_qMutex);
     m_cuePoints.push_back(pCue);
+    m_cueRevision->fetch_add(1, std::memory_order_release);
     markDirtyAndUnlock(&locked);
     emit cuesUpdated();
     return pCue;
+}
+
+CuePointer Track::createOrFindMemoryCue(
+        mixxx::audio::FramePos position,
+        mixxx::audio::FrameDiff_t duplicateToleranceFrames) {
+    VERIFY_OR_DEBUG_ASSERT(position.isValid() && duplicateToleranceFrames >= 0) {
+        return {};
+    }
+    auto locked = lockMutex(&m_qMutex);
+    CuePointer nearest;
+    auto nearestDistance = duplicateToleranceFrames + 1;
+    for (const auto& cue : std::as_const(m_cuePoints)) {
+        const auto cueLock = lockMutex(&cue->m_mutex);
+        if (cue->m_type != mixxx::CueType::Memory) {
+            continue;
+        }
+        const auto cuePosition = cue->m_startPosition;
+        if (!cuePosition.isValid()) {
+            continue;
+        }
+        const auto distance = std::abs(cuePosition - position);
+        if (distance <= duplicateToleranceFrames && distance < nearestDistance) {
+            nearest = cue;
+            nearestDistance = distance;
+        }
+    }
+    if (nearest) {
+        return nearest;
+    }
+    CuePointer cue(new Cue(mixxx::CueType::Memory,
+            Cue::kNoHotCue,
+            position,
+            mixxx::audio::kInvalidFramePos,
+            mixxx::PredefinedColorPalettes::kDefaultCueColor));
+    cue->moveToThread(thread());
+    // This cue has not been published to any other owner yet.
+    cue->m_revisionToken = m_cueRevision;
+    connect(cue.get(), &Cue::updated, this, &Track::slotCueUpdated);
+    m_cuePoints.push_back(cue);
+    m_cueRevision->fetch_add(1, std::memory_order_release);
+    markDirtyAndUnlock(&locked);
+    emit cuesUpdated();
+    return cue;
 }
 
 CuePointer Track::findCueByType(mixxx::CueType type) const {
@@ -1155,6 +1214,61 @@ CuePointer Track::findHotcueByIndex(int idx) const {
     }
 }
 
+bool Track::removeMemoryCue(const CuePointer& cue) {
+    if (!cue) {
+        return false;
+    }
+    auto trackLock = lockMutex(&m_qMutex);
+    auto cueLock = lockMutex(&cue->m_mutex);
+    if (!m_cuePoints.contains(cue) || cue->m_type != mixxx::CueType::Memory) {
+        return false;
+    }
+    disconnect(cue.get(), nullptr, this, nullptr);
+    m_cuePoints.removeOne(cue);
+    const bool remainsAttached = m_cuePoints.contains(cue);
+    m_cueRevision->fetch_add(1, std::memory_order_release);
+    cueLock.unlock();
+    if (!remainsAttached) {
+        cue->detachRevisionToken(m_cueRevision);
+    }
+    markDirtyAndUnlock(&trackLock);
+    emit cuesUpdated();
+    return true;
+}
+
+bool Track::updateMemoryCue(const CuePointer& cue,
+        std::optional<QString> label,
+        std::optional<mixxx::RgbColor> color) {
+    if (!cue) {
+        return false;
+    }
+    auto trackLock = lockMutex(&m_qMutex);
+    auto cueLock = lockMutex(&cue->m_mutex);
+    if (!m_cuePoints.contains(cue) || cue->m_type != mixxx::CueType::Memory) {
+        return false;
+    }
+    bool changed = false;
+    if (label && cue->m_label != *label) {
+        cue->m_label = *label;
+        cue->advanceRevisionLocked();
+        changed = true;
+    }
+    if (color && cue->m_color != *color) {
+        cue->m_color = *color;
+        cue->advanceRevisionLocked();
+        changed = true;
+    }
+    if (!changed) {
+        return true;
+    }
+    cue->m_bDirty = true;
+    cueLock.unlock();
+    trackLock.unlock();
+    // The existing Track connection marks the track dirty and emits cuesUpdated.
+    emit cue->updated();
+    return true;
+}
+
 void Track::removeCue(const CuePointer& pCue) {
     if (!pCue) {
         return;
@@ -1162,7 +1276,12 @@ void Track::removeCue(const CuePointer& pCue) {
 
     auto locked = lockMutex(&m_qMutex);
     disconnect(pCue.get(), nullptr, this, nullptr);
-    m_cuePoints.removeOne(pCue);
+    if (m_cuePoints.removeOne(pCue)) {
+        if (!m_cuePoints.contains(pCue)) {
+            pCue->detachRevisionToken(m_cueRevision);
+        }
+        m_cueRevision->fetch_add(1, std::memory_order_release);
+    }
     if (pCue->getType() == mixxx::CueType::MainCue) {
         m_record.setMainCuePosition(mixxx::audio::kStartFramePos);
     }
@@ -1179,6 +1298,10 @@ void Track::removeCuesOfType(mixxx::CueType type) {
         if (pCue->getType() == type) {
             disconnect(pCue.get(), nullptr, this, nullptr);
             it.remove();
+            if (!m_cuePoints.contains(pCue)) {
+                pCue->detachRevisionToken(m_cueRevision);
+            }
+            m_cueRevision->fetch_add(1, std::memory_order_release);
             if (type == mixxx::CueType::MainCue) {
                 m_record.setMainCuePosition(mixxx::audio::kStartFramePos);
             }
@@ -1204,6 +1327,10 @@ void Track::removeTempLoopCue() {
         if (pCue->getType() == mixxx::CueType::Loop && pCue->getHotCue() == Cue::kNoHotCue) {
             disconnect(pCue.get(), nullptr, this, nullptr);
             it.remove();
+            if (!m_cuePoints.contains(pCue)) {
+                pCue->detachRevisionToken(m_cueRevision);
+            }
+            m_cueRevision->fetch_add(1, std::memory_order_release);
             dirty = true;
             break;
         }
@@ -1372,16 +1499,22 @@ Track::ImportStatus Track::getCueImportStatus() const {
 }
 
 bool Track::setCuePointsWhileLocked(const QList<CuePointer>& cuePoints) {
+    // Preserve the original empty-to-empty no-op. Bulk installation is an
+    // off-callback operation; attaching a cue to another Track may allocate.
     if (m_cuePoints.isEmpty() && cuePoints.isEmpty()) {
-        // Nothing to do
         return false;
     }
     // disconnect existing cue points
     for (const auto& pCue : std::as_const(m_cuePoints)) {
         disconnect(pCue.get(), nullptr, this, nullptr);
+        pCue->detachRevisionToken(m_cueRevision);
     }
 
     m_cuePoints = cuePoints;
+    for (const auto& pCue : std::as_const(m_cuePoints)) {
+        pCue->attachRevisionToken(m_cueRevision);
+    }
+    m_cueRevision->fetch_add(1, std::memory_order_release);
     // connect new cue points
     for (const auto& pCue : std::as_const(m_cuePoints)) {
         DEBUG_ASSERT(pCue->thread() == thread());

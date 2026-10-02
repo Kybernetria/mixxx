@@ -123,7 +123,6 @@ case "$1" in
             librubberband-dev \
             libshout-idjc-dev \
             libsndfile1-dev \
-            libsoundtouch-dev \
             libspa-0.2-dev \
             libsqlite3-dev \
             libssl-dev \

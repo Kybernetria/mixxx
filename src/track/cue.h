@@ -3,8 +3,11 @@
 #include <QColor>
 #include <QMutex>
 #include <QObject>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <type_traits> // static_assert
+#include <vector>
 
 #include "audio/frame.h"
 #include "audio/types.h"
@@ -97,8 +100,13 @@ class Cue : public QObject {
     void setDirty(bool dirty);
 
     void setId(DbId dbId);
+    void attachRevisionToken(const std::shared_ptr<std::atomic<std::uint64_t>>& token);
+    void detachRevisionToken(const std::shared_ptr<std::atomic<std::uint64_t>>& token);
+    void advanceRevisionLocked();
 
     mutable QMutex m_mutex;
+    std::shared_ptr<std::atomic<std::uint64_t>> m_revisionToken;
+    std::vector<std::shared_ptr<std::atomic<std::uint64_t>>> m_additionalRevisionTokens;
 
     bool m_bDirty;
     DbId m_dbId;

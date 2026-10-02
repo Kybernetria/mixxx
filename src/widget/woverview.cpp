@@ -396,6 +396,11 @@ void WOverview::slotLoadingTrack(TrackPointer pNewTrack, TrackPointer pOldTrack)
                 &WOverview::receiveCuesUpdated);
     }
 
+    m_pHoveredMark.clear();
+    if (m_pCueMenuPopup) {
+        m_pCueMenuPopup->hide();
+    }
+    updateCues({});
     m_waveformSourceImage = QImage();
     m_analyzerProgress = kAnalyzerProgressUnknown;
     m_actualCompletion = 0;
@@ -508,6 +513,10 @@ void WOverview::slotScalingChanged() {
 }
 
 void WOverview::updateCues(const QList<CuePointer> &loadedCues) {
+    m_marks.syncMemoryCueMarks(m_group,
+            loadedCues,
+            m_dimBrightThreshold,
+            m_signalColors);
     for (const CuePointer& currentCue : loadedCues) {
         const WaveformMarkPointer pMark = m_marks.getHotCueMark(currentCue->getHotCue());
 
@@ -665,23 +674,26 @@ void WOverview::mousePressEvent(QMouseEvent* e) {
         } else if (m_pHoveredMark == nullptr) {
             m_bTimeRulerActive = true;
             m_timeRulerPos = e->pos();
-        } else if (m_pHoveredMark->getHotCue() != Cue::kNoHotCue) {
-            // Currently the only way WaveformMarks can be associated
-            // with their respective Cue objects is by using the hotcue
-            // number. If cues without assigned hotcue are drawn on
-            // WOverview in the future, another way to associate
-            // WaveformMarks with Cues will need to be implemented.
+        } else if (m_pHoveredMark->getHotCue() != Cue::kNoHotCue ||
+                m_pHoveredMark->getCue()) {
             CuePointer pHoveredCue;
+            const auto memoryCue = m_pHoveredMark->getCue();
             const QList<CuePointer> cueList = m_pCurrentTrack->getCuePoints();
             for (const auto& pCue : cueList) {
-                if (pCue->getHotCue() == m_pHoveredMark->getHotCue()) {
+                if ((memoryCue && pCue == memoryCue &&
+                            pCue->getType() == mixxx::CueType::Memory) ||
+                        (!memoryCue && pCue->getHotCue() == m_pHoveredMark->getHotCue())) {
                     pHoveredCue = pCue;
                     break;
                 }
             }
             if (pHoveredCue != nullptr) {
                 if (e->modifiers().testFlag(Qt::ShiftModifier)) {
-                    m_pCurrentTrack->removeCue(pHoveredCue);
+                    if (memoryCue) {
+                        m_pCurrentTrack->removeMemoryCue(pHoveredCue);
+                    } else {
+                        m_pCurrentTrack->removeCue(pHoveredCue);
+                    }
                     return;
                 } else {
                     // Clear the pickup position display, we have all cue info in the menu.

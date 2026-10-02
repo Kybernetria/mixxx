@@ -80,6 +80,7 @@ class WCueMenuPopup : public QWidget {
     void slotChangeCueColor(mixxx::RgbColor::optional_t color);
 
   private:
+    bool canConvertCue() const;
     void updateTypeAndColorIfDefault(mixxx::CueType newType);
     mixxx::audio::FramePos getCurrentPlayPositionWithQuantize() const;
 

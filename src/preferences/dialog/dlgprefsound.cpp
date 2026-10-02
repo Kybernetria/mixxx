@@ -25,9 +25,6 @@
 #include "util/rlimit.h"
 #include "util/scopedoverridecursor.h"
 
-#ifdef __RUBBERBAND__
-#include "engine/bufferscalers/rubberbandworkerpool.h"
-#endif
 
 namespace {
 
@@ -35,8 +32,6 @@ const QString kAppGroup = QStringLiteral("[App]");
 const QString kMasterGroup = QStringLiteral("[Master]");
 const ConfigKey kKeylockEngingeCfgkey =
         ConfigKey(kAppGroup, QStringLiteral("keylock_engine"));
-const ConfigKey kKeylockMultiThreadingCfgkey =
-        ConfigKey(kAppGroup, QStringLiteral("keylock_multithreading"));
 const ConfigKey kPipeWire =
         ConfigKey(kAppGroup, QStringLiteral("pipewire"));
 const ConfigKey kPipeWirePatchbay =
@@ -57,28 +52,6 @@ bool soundItemAlreadyExists(const AudioPath& output, const QWidget& widget) {
     return false;
 }
 
-#ifdef __RUBBERBAND__
-const QString kKeylockMultiThreadedAvailable = QStringLiteral("<p>") +
-        QObject::tr(
-                "Distribute stereo channels into mono channels processed in "
-                "parallel.") +
-        QStringLiteral("</p><p><span style=\"font-weight:600;\">") +
-        QObject::tr("Warning!") + QStringLiteral("</span></p><p>") +
-        QObject::tr(
-                "Processing stereo signal as mono channel "
-                "may result in pitch and tone imperfection, and this "
-                "is "
-                "mono-incompatible, due to third party limitations.") +
-        QStringLiteral("</p>");
-const QString kKeylockMultiThreadedUnavailableMono = QStringLiteral("<i>") +
-        QObject::tr(
-                "Dual threading mode is incompatible with mono main mix.") +
-        QStringLiteral("</i>");
-const QString kKeylockMultiThreadedUnavailableRubberband =
-        QStringLiteral("<i>") +
-        QObject::tr("Dual threading mode is only available with RubberBand.") +
-        QStringLiteral("</i>");
-#endif
 } // namespace
 
 /// Construct a new sound preferences pane. Initializes and populates
@@ -173,14 +146,6 @@ DlgPrefSound::DlgPrefSound(QWidget* pParent,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,
             &DlgPrefSound::engineClockChanged);
-
-    keylockComboBox->clear();
-    for (const auto engine : EngineBuffer::kKeylockEngines) {
-        if (EngineBuffer::isKeylockEngineAvailable(engine)) {
-            keylockComboBox->addItem(
-                    EngineBuffer::getKeylockEngineName(engine), QVariant::fromValue(engine));
-        }
-    }
 
     latencyCompensationSpinBox->setValue(m_pLatencyCompensation.get());
     latencyCompensationWarningLabel->setWordWrap(true);
@@ -412,22 +377,6 @@ DlgPrefSound::DlgPrefSound(QWidget* pParent,
             QOverload<int>::of(&QComboBox::currentIndexChanged),
             this,
             &DlgPrefSound::settingChanged);
-    connect(keylockComboBox,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this,
-            &DlgPrefSound::settingChanged);
-#ifdef __RUBBERBAND__
-    connect(keylockComboBox,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this,
-            &DlgPrefSound::updateKeylockDualThreadingCheckbox);
-    connect(keylockDualthreadedCheckBox,
-            &QCheckBox::clicked,
-            this,
-            &DlgPrefSound::updateKeylockMultithreading);
-#else
-    keylockDualthreadedCheckBox->hide();
-#endif
 
     connect(queryButton, &QAbstractButton::clicked, this, &DlgPrefSound::queryClicked);
 
@@ -561,35 +510,12 @@ void DlgPrefSound::slotApply() {
     SoundDeviceStatus status = SoundDeviceStatus::Ok;
     {
         ScopedWaitCursor cursor;
-        const auto keylockEngine =
-                keylockComboBox->currentData().value<EngineBuffer::KeylockEngine>();
-
-        // Temporary set an empty config to force the audio thread to stop and
-        // stay off while we are swapping the keylock settings. This is
-        // necessary because the audio thread doesn't have any synchronisation
-        // mechanism due to its realtime nature and editing the RubberBand
-        // config while it is running leads to race conditions.
+        // Keep the legacy setting normalized while preserving the existing
+        // audio-device close/apply sequence.
         m_pSoundManager->closeActiveConfig();
-
-        m_pKeylockEngine.set(static_cast<double>(keylockEngine));
+        m_pKeylockEngine.set(static_cast<double>(EngineBuffer::KeylockEngine::Signalsmith));
         m_pSettings->set(kKeylockEngingeCfgkey,
-                ConfigValue(static_cast<int>(keylockEngine)));
-
-#ifdef __RUBBERBAND__
-        bool keylockMultithreading = m_pSettings->getValue(
-                kKeylockMultiThreadingCfgkey, false);
-        m_pSettings->setValue(kKeylockMultiThreadingCfgkey,
-                keylockDualthreadedCheckBox->isChecked() &&
-                        keylockDualthreadedCheckBox->isEnabled());
-        if (keylockMultithreading !=
-                (keylockDualthreadedCheckBox->isChecked() &&
-                        keylockDualthreadedCheckBox->isEnabled())) {
-            QMessageBox::information(this,
-                    tr("Information"),
-                    tr("Mixxx must be restarted before the multi-threaded "
-                       "RubberBand setting change will take effect."));
-        }
-#endif
+                ConfigValue(static_cast<int>(EngineBuffer::KeylockEngine::Signalsmith)));
 
 #ifdef __PIPEWIRE__
         if (CmdlineArgs::Instance().getDeveloper()) {
@@ -615,9 +541,6 @@ void DlgPrefSound::slotApply() {
     m_bSkipConfigClear = true;
     loadSettings(); // in case SM decided to change anything it didn't like
     checkLatencyCompensation();
-#ifdef __RUBBERBAND__
-    updateKeylockDualThreadingCheckbox();
-#endif
     m_bSkipConfigClear = false;
 }
 
@@ -804,26 +727,10 @@ void DlgPrefSound::loadSettings(const SoundManagerConfig& config) {
         engineClockComboBox->setCurrentIndex(0);
     }
 
-    // Default keylock engine is Rubberband Faster (v2)
-    const auto keylockEngine = static_cast<EngineBuffer::KeylockEngine>(
-            m_pSettings->getValue(kKeylockEngingeCfgkey,
-                    static_cast<int>(EngineBuffer::defaultKeylockEngine())));
-    const auto keylockEngineVariant = QVariant::fromValue(keylockEngine);
-    const int index = keylockComboBox->findData(keylockEngineVariant);
-    if (index >= 0) {
-        keylockComboBox->setCurrentIndex(index);
-    } else {
-        keylockComboBox->addItem(
-                EngineBuffer::getKeylockEngineName(keylockEngine), keylockEngineVariant);
-        keylockComboBox->setCurrentIndex(keylockComboBox->count() - 1);
-    }
-
-#ifdef __RUBBERBAND__
-    // Default is no multi threading on keylock
-    keylockDualthreadedCheckBox->setChecked(m_pSettings->getValue(
-            kKeylockMultiThreadingCfgkey,
-            false));
-#endif
+    // Normalize the historical config key to the only supported deck engine.
+    const auto keylockEngine = EngineBuffer::defaultKeylockEngine();
+    m_pSettings->set(kKeylockEngingeCfgkey, ConfigValue(static_cast<int>(keylockEngine)));
+    m_pKeylockEngine.set(static_cast<double>(keylockEngine));
 
     // Collect selected I/O channel indices for all non-empty device comboboxes
     // in order to allow auto-selecting free channels when different devices are
@@ -1112,47 +1019,6 @@ void DlgPrefSound::settingChanged() {
     m_settingsModified = true;
 }
 
-#ifdef __RUBBERBAND__
-void DlgPrefSound::updateKeylockDualThreadingCheckbox() {
-    bool supportedScaler = keylockComboBox->currentData()
-                                   .value<EngineBuffer::KeylockEngine>() !=
-            EngineBuffer::KeylockEngine::SoundTouch;
-    bool monoMix = mainOutputModeComboBox->currentIndex() == 1;
-    keylockDualthreadedCheckBox->setEnabled(!monoMix && supportedScaler);
-    keylockDualthreadedCheckBox->setToolTip(monoMix
-                    ? kKeylockMultiThreadedUnavailableMono
-                    : (supportedScaler
-                                      ? kKeylockMultiThreadedAvailable
-                                      : kKeylockMultiThreadedUnavailableRubberband));
-}
-
-void DlgPrefSound::updateKeylockMultithreading(bool enabled) {
-    m_settingsModified = true;
-    if (!enabled) {
-        return;
-    }
-    QMessageBox msg;
-    msg.setIcon(QMessageBox::Warning);
-    msg.setWindowTitle(tr("Are you sure?"));
-    msg.setText(
-            QStringLiteral("<p>%1</p><p>%2</p>")
-                    .arg(tr("Distribute stereo channels into mono channels for "
-                            "parallel processing will result in a loss of "
-                            "mono compatibility and a diffuse stereo "
-                            "image. It is not recommended during "
-                            "broadcasting or recording."),
-                            tr("Are you sure you wish to proceed?")));
-    QPushButton* pNoBtn = msg.addButton(tr("No"), QMessageBox::AcceptRole);
-    QPushButton* pYesBtn = msg.addButton(
-            tr("Yes, I know what I am doing"), QMessageBox::RejectRole);
-    msg.setDefaultButton(pNoBtn);
-    msg.exec();
-    keylockDualthreadedCheckBox->setChecked(msg.clickedButton() == pYesBtn);
-
-    updateKeylockDualThreadingCheckbox();
-}
-#endif
-
 /// Slot called when a device from the config can not be selected, i.e. is
 /// currently not available. This may happen during startup when MixxxMainWindow
 /// opens this page to allow users to make adjustments in case configured
@@ -1240,11 +1106,7 @@ void DlgPrefSound::slotResetToDefaults() {
     loadSettings(newConfig);
 
     const auto keylockEngine = EngineBuffer::defaultKeylockEngine();
-    const int index = keylockComboBox->findData(QVariant::fromValue(keylockEngine));
-    DEBUG_ASSERT(index >= 0);
-    if (index >= 0) {
-        keylockComboBox->setCurrentIndex(index);
-    }
+    m_pSettings->set(kKeylockEngingeCfgkey, ConfigValue(static_cast<int>(keylockEngine)));
     m_pKeylockEngine.set(static_cast<double>(keylockEngine));
 
     mainMixComboBox->setCurrentIndex(1);
@@ -1270,9 +1132,6 @@ void DlgPrefSound::slotResetToDefaults() {
     latencyCompensationSpinBox->setValue(latencyCompensationSpinBox->minimum());
 
     settingChanged();
-#ifdef __RUBBERBAND__
-    updateKeylockDualThreadingCheckbox();
-#endif
 }
 
 void DlgPrefSound::bufferUnderflow(double count) {
@@ -1317,10 +1176,6 @@ void DlgPrefSound::mainEnabledChanged(double value) {
 
 void DlgPrefSound::mainOutputModeComboBoxChanged(int value) {
     m_pMainMonoMixdown->set(static_cast<double>(value));
-
-#ifdef __RUBBERBAND__
-    updateKeylockDualThreadingCheckbox();
-#endif
 }
 
 void DlgPrefSound::mainMonoMixdownChanged(double value) {

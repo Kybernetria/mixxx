@@ -1,13 +1,14 @@
 #include "engine/enginebuffer.h"
 
 #include <QtDebug>
+#include <cmath>
 
 #include "control/controllinpotmeter.h"
 #include "control/controlpotmeter.h"
 #include "control/controlproxy.h"
 #include "control/controlpushbutton.h"
 #include "engine/bufferscalers/enginebufferscalelinear.h"
-#include "engine/bufferscalers/enginebufferscalest.h"
+#include "engine/bufferscalers/enginebufferscalesignalsmith.h"
 #include "engine/cachingreader/cachingreader.h"
 #include "engine/channels/enginechannel.h"
 #include "engine/controls/bpmcontrol.h"
@@ -16,6 +17,7 @@
 #include "engine/controls/enginecontrol.h"
 #include "engine/controls/keycontrol.h"
 #include "engine/controls/loopingcontrol.h"
+#include "engine/controls/memorycuecontrol.h"
 #include "engine/controls/quantizecontrol.h"
 #include "engine/controls/ratecontrol.h"
 #include "engine/enginemixer.h"
@@ -29,14 +31,11 @@
 #include "util/assert.h"
 #include "util/compatibility/qatomic.h"
 #include "util/defs.h"
+#include "util/fpclassify.h"
 #include "util/logger.h"
 #include "util/sample.h"
 #include "util/timer.h"
 #include "waveform/visualplayposition.h"
-
-#ifdef __RUBBERBAND__
-#include "engine/bufferscalers/enginebufferscalerubberband.h"
-#endif
 
 #ifdef __VINYLCONTROL__
 #include "engine/controls/vinylcontrolcontrol.h"
@@ -73,6 +72,7 @@ EngineBuffer::EngineBuffer(const QString& group,
           m_playPos(kInitialPlayPosition),
           m_speed_old(0),
           m_actual_speed(0),
+          m_renderedIndicatorSpeed(0),
           m_tempo_ratio_old(1.),
           m_scratching_old(false),
           m_reverse_old(false),
@@ -244,6 +244,8 @@ EngineBuffer::EngineBuffer(const QString& group,
     // Create the cue controller
     m_pCueControl = new CueControl(group, pConfig);
     addControl(m_pCueControl);
+    m_pMemoryCueControl = new MemoryCueControl(group, pConfig);
+    addControl(m_pMemoryCueControl);
 
     connect(m_pLoopingControl,
             &LoopingControl::loopReset,
@@ -277,10 +279,7 @@ EngineBuffer::EngineBuffer(const QString& group,
             Qt::DirectConnection);
     // Construct scaling objects
     m_pScaleLinear = new EngineBufferScaleLinear(m_pReadAheadManager);
-    m_pScaleST = new EngineBufferScaleST(m_pReadAheadManager);
-#ifdef __RUBBERBAND__
-    m_pScaleRB = new EngineBufferScaleRubberBand(m_pReadAheadManager);
-#endif
+    m_pScaleSignalsmith = new EngineBufferScaleSignalsmith(m_pReadAheadManager);
     slotKeylockEngineChanged(m_pKeylockEngine->get());
     m_pScaleVinyl = m_pScaleLinear;
     m_pScale = m_pScaleVinyl;
@@ -333,10 +332,7 @@ EngineBuffer::~EngineBuffer() {
     delete m_pTrackSampleRate;
 
     delete m_pScaleLinear;
-    delete m_pScaleST;
-#ifdef __RUBBERBAND__
-    delete m_pScaleRB;
-#endif
+    delete m_pScaleSignalsmith;
 
     delete m_pKeylock;
     delete m_pReplayGain;
@@ -358,7 +354,9 @@ void EngineBuffer::enableIndependentPitchTempoScaling(bool bEnable,
 
     // m_pScaleKeylock and m_pScaleVinyl could change out from under us,
     // so cache it.
-    EngineBufferScale* keylock_scale = m_pScaleKeylock;
+    EngineBufferScale* keylock_scale = m_callbackKeylockScale
+            ? m_callbackKeylockScale
+            : m_pScaleKeylock.load(std::memory_order_acquire);
     EngineBufferScale* vinyl_scale = m_pScaleVinyl;
 
     if (bEnable && m_pScale != keylock_scale) {
@@ -466,6 +464,11 @@ void EngineBuffer::requestSyncMode(SyncMode mode) {
 }
 
 void EngineBuffer::readToCrossfadeBuffer(const std::size_t bufferSize) {
+    // Do not read a stale scaler output format into the current buffer.
+    if (m_pScale->getOutputSignal().getSampleRate() != m_sampleRate ||
+            m_pScale->getOutputSignal().getChannelCount() != m_channelCount) {
+        return;
+    }
     if (!m_bCrossfadeReady) {
         // Read buffer, as if there where no parameter change
         // (Must be called only once per callback)
@@ -523,6 +526,7 @@ bool EngineBuffer::isReverse() const {
 
 // WARNING: Always called from the EngineWorker thread pool
 void EngineBuffer::slotTrackLoading() {
+    m_pMemoryCueControl->invalidateTrack();
     // Pause EngineBuffer from processing frames
     m_pause.lock();
     // Setting m_iTrackLoading inside a m_pause.lock ensures that
@@ -860,37 +864,38 @@ void EngineBuffer::slotControlStop(double v)
     }
 }
 
+#ifdef BUILD_TESTING
+void EngineBuffer::setKeylockPreparationPausedForTest(bool paused) {
+    m_pScaleSignalsmith->setPreparationPausedForTest(paused);
+}
+#endif
+
+EngineBuffer::KeylockEngine EngineBuffer::resolveKeylockEngine(double savedId) {
+    if (!util_isfinite(savedId)) {
+        return KeylockEngine::Signalsmith;
+    }
+    // Avoid floating-to-enum conversion until the saved numeric ID is validated.
+    for (const auto engine : kKeylockEngines) {
+        if (savedId == static_cast<double>(engine) && isKeylockEngineAvailable(engine)) {
+            return engine;
+        }
+    }
+    // Legacy engines, reserved IDs, and invalid values deterministically use
+    // the only supported deck keylock engine.
+    return KeylockEngine::Signalsmith;
+}
+
 void EngineBuffer::slotKeylockEngineChanged(double dIndex) {
     if (m_bScalerOverride) {
         return;
     }
-    const KeylockEngine engine = static_cast<KeylockEngine>(dIndex);
-    switch (engine) {
-    case KeylockEngine::SoundTouch:
-        m_pScaleKeylock = m_pScaleST;
-        break;
-#ifdef __RUBBERBAND__
-    case KeylockEngine::RubberBandFaster:
-        m_pScaleRB->useEngineFiner(false);
-        m_pScaleRB->useOptionWindowShort(false);
-        m_pScaleKeylock = m_pScaleRB;
-        break;
-    case KeylockEngine::RubberBandFiner:
-        m_pScaleRB->useEngineFiner(
-                true); // in case of Rubberband V2 it falls back to RUBBERBAND_FASTER
-        m_pScaleRB->useOptionWindowShort(false);
-        m_pScaleKeylock = m_pScaleRB;
-        break;
-    case KeylockEngine::RubberBandR3ShortWindow:
-        m_pScaleRB->useEngineFiner(true);
-        m_pScaleRB->useOptionWindowShort(true);
-        m_pScaleKeylock = m_pScaleRB;
-        break;
-#endif
-    default:
-        slotKeylockEngineChanged(static_cast<double>(defaultKeylockEngine()));
-        break;
+    // Keep the legacy control/config key, but normalize every saved or live
+    // value to the sole supported deck keylock engine.
+    const auto engine = resolveKeylockEngine(dIndex);
+    if (dIndex != static_cast<double>(engine)) {
+        m_pKeylockEngine->set(static_cast<double>(engine));
     }
+    m_pScaleKeylock = m_pScaleSignalsmith;
 }
 
 void EngineBuffer::slipQuitAndAdopt() {
@@ -953,24 +958,16 @@ void EngineBuffer::processTrackLocked(
 
     bool useIndependentPitchAndTempoScaling = false;
 
-    // TODO(owen): Maybe change this so that rubberband doesn't disable
-    // keylock on scratch. (just check m_pScaleKeylock == m_pScaleST)
+    // TODO(owen): Consider whether keylock should remain enabled while scratching.
     if (is_scratching || fabs(speed) > 1.9) {
-        // Scratching and high speeds with always disables keylock
-        // because Soundtouch sounds terrible in these conditions.  Rubberband
-        // sounds better, but still has some problems (it may reallocate in
-        // a party-crashing manner at extremely slow speeds).
-        // High seek speeds also disables keylock.  Our pitch slider could go
-        // to 90%, so that's the cutoff point.
+        // Scratching, high speeds, and high seek speeds disable keylock. Our
+        // pitch slider could go to 90%, so that's the cutoff point.
 
         // Force pitchRatio to the linear pitch set by speed
         pitchRatio = speed;
         // This is for the natural speed pitch found on turn tables
     } else if (fabs(speed) < 0.1) {
-        // We have pre-allocated big buffers in Rubberband and Soundtouch for
-        // a minimum speed of 0.1. Slower speeds will re-allocate much bigger
-        // buffers which may cause underruns.
-        // Disable keylock under these conditions.
+        // Disable keylock at very slow speeds.
 
         // Force pitchRatio to the linear pitch set by speed
         pitchRatio = speed;
@@ -1131,6 +1128,11 @@ void EngineBuffer::processTrackLocked(
     if (!bCurBufferPaused) {
         // Perform scaling of Reader buffer into buffer.
         const double framesRead = m_pScale->scaleBuffer(pOutput, bufferSize);
+        // Lookahead gathered for asynchronous preroll is not audible transport.
+        // Use delivered source frames, not position deltas (which include loops).
+        m_renderedIndicatorSpeed = baseSampleRate > 0
+                ? std::copysign(framesRead / (bufferSize / m_channelCount) / baseSampleRate, rate)
+                : 0;
 
         // TODO(XXX): The result framesRead might not be an integer value.
         // Converting to samples here does not make sense. All positional
@@ -1166,6 +1168,7 @@ void EngineBuffer::processTrackLocked(
         // or start may pass in the middle of the buffer.
     } else {
         // Pause
+        m_renderedIndicatorSpeed = 0;
         if (m_bCrossfadeReady) {
             // We don't ramp here, since EnginePregain handles fades
             // from and to speed == 0
@@ -1230,15 +1233,10 @@ void EngineBuffer::process(CSAMPLE* pOutput, const std::size_t bufferSize) {
     //   miscellaneous upkeep issues.
 
     m_sampleRate = mixxx::audio::SampleRate::fromDouble(m_pSampleRate->get());
+    m_callbackKeylockScale = m_pScaleKeylock.load(std::memory_order_acquire);
 
-    // If the sample rate has changed, force Rubberband to reset so that
-    // it doesn't reallocate when the user engages keylock during playback.
-    // We do this even if rubberband is not active.
     m_pScaleLinear->setSignal(m_sampleRate, m_channelCount);
-    m_pScaleST->setSignal(m_sampleRate, m_channelCount);
-#ifdef __RUBBERBAND__
-    m_pScaleRB->setSignal(m_sampleRate, m_channelCount);
-#endif
+    m_pScaleSignalsmith->setSignal(m_sampleRate, m_channelCount);
 
     if (isTrackLoaded() && m_pause.tryLock()) {
         processTrackLocked(pOutput, bufferSize, m_sampleRate);
@@ -1266,6 +1264,7 @@ void EngineBuffer::process(CSAMPLE* pOutput, const std::size_t bufferSize) {
         m_rate_old = 0;
         m_speed_old = 0;
         m_actual_speed = 0;
+        m_renderedIndicatorSpeed = 0;
         m_scratching_old = false;
     }
 
@@ -1279,6 +1278,7 @@ void EngineBuffer::process(CSAMPLE* pOutput, const std::size_t bufferSize) {
 
     m_lastBufferSize = bufferSize;
     m_bCrossfadeReady = false;
+    m_callbackKeylockScale = nullptr;
 }
 
 void EngineBuffer::processSlip(std::size_t bufferSize) {
@@ -1476,7 +1476,8 @@ void EngineBuffer::postProcess(const std::size_t bufferSize) {
 
     // Update all the indicators that EngineBuffer publishes to allow
     // external parts of Mixxx to observe its status.
-    updateIndicators(m_speed_old, bufferSize);
+    updateIndicators(m_pScale == m_pScaleSignalsmith ? m_renderedIndicatorSpeed : m_speed_old,
+            bufferSize);
 }
 
 mixxx::audio::FramePos EngineBuffer::queuedSeekPosition() const {

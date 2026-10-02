@@ -1,7 +1,7 @@
 #pragma once
 
 #include <gsl/pointers>
-#include <list>
+#include <memory>
 
 #include "audio/frame.h"
 #include "engine/cachingreader/cachingreader.h"
@@ -14,8 +14,7 @@ class RateControl;
 
 /// ReadAheadManager is a tool for keeping track of the engine's current position
 /// in a file. In the case that the engine needs to read ahead of the current
-/// play position (for example, to feed more samples into a library like
-/// SoundTouch) then this will keep track of how many samples the engine has
+/// play position then this will keep track of how many samples the engine has
 /// consumed. The getNextSamples() method encapsulates the logic of determining
 /// whether to take a loop or jump into a single method. Whenever the Engine
 /// seeks or the current play position is invalidated somehow, the Engine must
@@ -37,6 +36,19 @@ class ReadAheadManager {
     virtual SINT getNextSamples(double dRate,
             CSAMPLE* buffer,
             SINT requested_samples,
+            mixxx::audio::ChannelCount channelCount);
+
+    struct StretchReadResult {
+        SINT samplesRead;
+        bool unavailable;
+    };
+
+    /// Transactional, single-cache-chunk read for a stretcher. A cache miss
+    /// does not advance the read cursor or discard a previously read prefix.
+    /// EOF/preroll silence is successful input, not an unavailable cache chunk.
+    virtual StretchReadResult getNextSamplesForStretch(double rate,
+            CSAMPLE* buffer,
+            SINT requestedSamples,
             mixxx::audio::ChannelCount channelCount);
 
     /// Used to add a new EngineControls that ReadAheadManager will use to decide
@@ -69,11 +81,20 @@ class ReadAheadManager {
             mixxx::audio::ChannelCount channelCount);
 
   private:
+    SINT readNextSamples(double rate,
+            CSAMPLE* buffer,
+            SINT requestedSamples,
+            mixxx::audio::ChannelCount channelCount,
+            bool suspendOnMiss,
+            bool* unavailable);
+
     /// An entry in the read log indicates the virtual playposition the read
     /// began at and the virtual playposition it ended at.
     struct ReadLogEntry {
         double virtualPlaypositionStart;
         double virtualPlaypositionEndNonInclusive;
+
+        ReadLogEntry() = default;
 
         ReadLogEntry(double virtualPlaypositionStart,
                      double virtualPlaypositionEndNonInclusive) {
@@ -127,7 +148,14 @@ class ReadAheadManager {
     LoopingControl* m_pLoopingControl;
     CueControl* m_pCueControl;
     RateControl* m_pRateControl;
-    std::list<ReadLogEntry> m_readAheadLog;
+    // Enough entries for two maximum-sized outstanding input batches even
+    // when every source frame crosses a loop boundary. Storage is allocated
+    // during reader construction, never by read/log consumption in a callback.
+    static constexpr std::size_t kReadLogCapacity = 320002;
+    std::unique_ptr<ReadLogEntry[]> m_readAheadLog{
+            std::make_unique<ReadLogEntry[]>(kReadLogCapacity)};
+    std::size_t m_readLogStart = 0;
+    std::size_t m_readLogSize = 0;
     double m_currentPosition; // In absolute samples
     CachingReader* m_pReader;
     CSAMPLE* m_pCrossFadeBuffer;

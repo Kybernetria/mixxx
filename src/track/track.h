@@ -4,6 +4,8 @@
 #include <QObject>
 #include <QStack>
 #include <QUrl>
+#include <atomic>
+#include <cstdint>
 #include <memory>
 
 #include "audio/streaminfo.h"
@@ -320,6 +322,10 @@ class Track : public QObject {
             mixxx::audio::FramePos startPosition,
             mixxx::audio::FramePos endPosition,
             mixxx::RgbColor color = mixxx::PredefinedColorPalettes::kDefaultCueColor);
+    // Atomically returns an existing nearby memory cue or creates one.
+    CuePointer createOrFindMemoryCue(
+            mixxx::audio::FramePos position,
+            mixxx::audio::FrameDiff_t duplicateToleranceFrames);
     CuePointer createAndAddCue(
             mixxx::CueType type,
             int hotCueIndex,
@@ -337,9 +343,17 @@ class Track : public QObject {
     CuePointer findCueByType(mixxx::CueType type) const; // NOTE: Cannot be used for hotcues.
     CuePointer findCueById(DbId id) const;
     CuePointer findHotcueByIndex(int idx) const;
+    // Memory-only edits validate membership and type together under Track/Cue locks.
+    bool removeMemoryCue(const CuePointer& cue);
+    bool updateMemoryCue(const CuePointer& cue,
+            std::optional<QString> label,
+            std::optional<mixxx::RgbColor> color);
     void removeCue(const CuePointer& pCue);
     void removeCuesOfType(mixxx::CueType);
     void removeTempLoopCue();
+    std::shared_ptr<std::atomic<std::uint64_t>> cueRevisionToken() const {
+        return m_cueRevision;
+    }
     QList<CuePointer> getCuePoints() const {
         const QMutexLocker lock(&m_qMutex);
         // lock thread-unsafe copy constructors of QList
@@ -616,6 +630,8 @@ class Track : public QObject {
 
     // The list of cue points for the track
     QList<CuePointer> m_cuePoints;
+    const std::shared_ptr<std::atomic<std::uint64_t>> m_cueRevision{
+            std::make_shared<std::atomic<std::uint64_t>>(0)};
 
 #ifdef __STEM__
     // The list of stem info

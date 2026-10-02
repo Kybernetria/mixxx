@@ -1211,7 +1211,6 @@ add_library(
   src/analyzer/analyzerwaveform.cpp
   src/analyzer/plugins/analyzerqueenmarybeats.cpp
   src/analyzer/plugins/analyzerqueenmarykey.cpp
-  src/analyzer/plugins/analyzersoundtouchbeats.cpp
   src/analyzer/plugins/buffering_utils.cpp
   src/analyzer/trackanalysisscheduler.cpp
   src/audio/frame.cpp
@@ -1355,7 +1354,7 @@ add_library(
   src/encoder/encoderwavesettings.cpp
   src/engine/bufferscalers/enginebufferscale.cpp
   src/engine/bufferscalers/enginebufferscalelinear.cpp
-  src/engine/bufferscalers/enginebufferscalest.cpp
+  src/engine/bufferscalers/enginebufferscalesignalsmith.cpp
   src/engine/cachingreader/cachingreader.cpp
   src/engine/cachingreader/cachingreaderchunk.cpp
   src/engine/cachingreader/cachingreaderworker.cpp
@@ -1367,6 +1366,7 @@ add_library(
   src/engine/controls/bpmcontrol.cpp
   src/engine/controls/clockcontrol.cpp
   src/engine/controls/cuecontrol.cpp
+  src/engine/controls/memorycuecontrol.cpp
   src/engine/controls/enginecontrol.cpp
   src/engine/controls/keycontrol.cpp
   src/engine/controls/loopingcontrol.cpp
@@ -1639,6 +1639,7 @@ add_library(
   src/track/beatutils.cpp
   src/track/bpm.cpp
   src/track/cue.cpp
+  src/track/memorycues.cpp
   src/track/cueinfo.cpp
   src/track/cueinfoimporter.cpp
   src/track/globaltrackcache.cpp
@@ -1807,6 +1808,7 @@ add_library(
   src/widget/weffectselector.cpp
   src/widget/wfindonwebmenu.cpp
   src/widget/whotcuebutton.cpp
+  src/widget/wmemorycuebutton.cpp
   src/widget/wimagestore.cpp
   src/widget/wkey.cpp
   src/widget/wknob.cpp
@@ -2926,6 +2928,7 @@ if(BUILD_TESTING)
     src-mixxx-test
     src/test/analyserwaveformtest.cpp
     src/test/analyzersilence_test.cpp
+    src/test/analyzerbeats_test.cpp
     src/test/audiotaperpot_test.cpp
     src/test/autodjprocessor_test.cpp
     src/test/beatgridtest.cpp
@@ -2957,6 +2960,12 @@ if(BUILD_TESTING)
     src/test/coverartutils_test.cpp
     src/test/cratestorage_test.cpp
     src/test/cue_test.cpp
+    src/test/memorycues_test.cpp
+    src/test/memorycuemarks_test.cpp
+    src/test/memorycuepopup_test.cpp
+    src/test/memorycuecontrol_test.cpp
+    src/test/signalsmithmemoryintegration_test.cpp
+    src/test/stretchcallbackworkload_test.cpp
     src/test/cuecontrol_test.cpp
     src/test/delayringtest.cpp
     src/test/dbconnectionpool_test.cpp
@@ -2967,6 +2976,9 @@ if(BUILD_TESTING)
     #TODO: write useful tests for refactored effects system
     #src/test/effectchainslottest.cpp
     src/test/enginebufferscalelineartest.cpp
+    src/test/enginebufferscalesignalsmithtest.cpp
+    src/test/callbackallocationcheck.cpp
+    src/test/boundedatomicvalue_test.cpp
     src/test/enginebuffertest.cpp
     src/test/enginefilterbiquadtest.cpp
     src/test/enginemixertest.cpp
@@ -3073,6 +3085,18 @@ if(BUILD_TESTING)
     mixxx-test
     PUBLIC RESOURCE_FOLDER="${CMAKE_CURRENT_SOURCE_DIR}/res"
   )
+  # Preference-dialog regressions include the same generated UI as mixxx-lib.
+  if(CMAKE_CONFIGURATION_TYPES)
+    target_include_directories(
+      mixxx-test
+      PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/mixxx-lib_autogen/include_$<CONFIG>"
+    )
+  else()
+    target_include_directories(
+      mixxx-test
+      PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/mixxx-lib_autogen/include"
+    )
+  endif()
 
   if(HID)
     target_sources(
@@ -4863,23 +4887,24 @@ target_include_directories(mixxx-lib SYSTEM PRIVATE lib/reverb)
 target_link_libraries(mixxx-lib PRIVATE Reverb)
 
 # Rubberband
-option(RUBBERBAND "Enable the rubberband engine for pitch-bending" ON)
+# Immutable Signalsmith Audio snapshots; see lib/signalsmith/PROVENANCE.md.
+add_library(signalsmith INTERFACE)
+target_include_directories(
+  signalsmith
+  INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/lib/signalsmith-stretch/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/lib/signalsmith-linear/include"
+)
+target_link_libraries(mixxx-lib PRIVATE signalsmith)
+
+option(RUBBERBAND "Enable RubberBand pitch-shift effects" ON)
 if(RUBBERBAND)
   find_package(rubberband REQUIRED)
   target_link_libraries(mixxx-lib PUBLIC rubberband::rubberband)
   target_compile_definitions(mixxx-lib PUBLIC __RUBBERBAND__)
-  if(QML)
-    target_link_libraries(mixxx-qml-lib PRIVATE rubberband::rubberband)
-    target_compile_definitions(mixxx-qml-lib PUBLIC __RUBBERBAND__)
-  endif()
   target_sources(
     mixxx-lib
-    PRIVATE
-      src/effects/backends/builtin/pitchshifteffect.cpp
-      src/engine/bufferscalers/enginebufferscalerubberband.cpp
-      src/engine/bufferscalers/rubberbandwrapper.cpp
-      src/engine/bufferscalers/rubberbandtask.cpp
-      src/engine/bufferscalers/rubberbandworkerpool.cpp
+    PRIVATE src/effects/backends/builtin/pitchshifteffect.cpp
   )
 endif()
 
@@ -4893,10 +4918,6 @@ if(SndFile_SUPPORTS_SET_COMPRESSION_LEVEL)
     PUBLIC SFC_SUPPORTS_SET_COMPRESSION_LEVEL
   )
 endif()
-
-# SoundTouch
-find_package(SoundTouch 2.1.2 REQUIRED)
-target_link_libraries(mixxx-lib PRIVATE SoundTouch::SoundTouch)
 
 # TagLib
 find_package(TagLib 1.11 REQUIRED)

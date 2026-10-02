@@ -23,8 +23,6 @@ Category {
         microphoneMonitorMode.currentIndex = micMonitorMode.value;
         soundApi.options = manager.getHostAPIList();
         soundApi.selected = manager.getAPI();
-        keylock.update();
-        keylock.selected = keylock.options[manager.getKeylockEngine()];
 
         // Router
         router.multiSoundcard.selected = router.multiSoundcard.options[manager.getSyncBuffers()];
@@ -54,7 +52,6 @@ Category {
         manager.setAudioBufferSizeIndex(audioBuffer.currentIndex + 1);
         micMonitorMode.value = microphoneMonitorMode.currentIndex;
         manager.setAPI(soundApi.selected);
-        manager.setKeylockEngine(keylock.options.indexOf(keylock.selected));
 
         // Router
         manager.setSyncBuffers(router.multiSoundcard.options.indexOf(router.multiSoundcard.selected));
@@ -298,53 +295,6 @@ Category {
 
                                     onSelectedChanged: {
                                         root.hasChanges = true;
-                                    }
-                                }
-                            }
-                            RowLayout {
-                                Text {
-                                    Layout.fillWidth: true
-                                    color: Theme.white
-                                    font.pixelSize: 14
-                                    text: "Keylock engine"
-                                }
-                                RatioChoice {
-                                    id: keylock
-
-                                    function update() {
-                                        let options = [];
-                                        let tooltips = [];
-                                        for (let engine of Mixxx.SoundManager.getKeylockEngines()) {
-                                            switch (engine) {
-                                            case 0:
-                                                options.push(qsTr("Soundtouch"));
-                                                tooltips.push(qsTr("Faster"));
-                                                break;
-                                            case 1:
-                                                options.push(qsTr("Rubberband"));
-                                                tooltips.push(qsTr("Better"));
-                                                break;
-                                            case 2:
-                                                options.push(qsTr("Rubberband R3"));
-                                                tooltips.push(qsTr("Near-hi-fi quality"));
-                                                break;
-                                            }
-                                        }
-                                        keylock.options = options;
-                                        keylock.tooltips = tooltips;
-                                    }
-
-                                    maxWidth: tabSection.width * 0.4
-                                    normalizedWidth: false
-                                    options: []
-                                    tooltips: []
-
-                                    onSelectedChanged: {
-                                        root.hasChanges = true;
-                                    }
-
-                                    Mixxx.SettingParameter {
-                                        label: "Keylock engine"
                                     }
                                 }
                             }

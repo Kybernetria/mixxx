@@ -1228,6 +1228,15 @@ declare namespace MixxxControls {
          * @feedback Cue mark appears on the waveform
          */
         | 'cue_set'
+        | 'memory_cue_set'
+        | 'memory_cue_next'
+        | 'memory_cue_prev'
+        | 'memory_cue_clear'
+        | 'memory_cue_clear_nearest'
+        | 'memory_cue_clear_prev'
+        | 'memory_cue_clear_next'
+        | 'memory_cue_clear_all'
+        | 'memory_cue_overflows'
 
         /**
          * If the player is not playing, set the cue point at the current location otherwise seek to the cue point.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QList>
+#include <map>
 #include <optional>
 
 #include "skin/legacy/skincontext.h"
@@ -68,12 +69,19 @@ class WaveformMarkSet {
         m_marks.clear();
         m_marksToRender.clear();
         m_hotCueMarks.clear();
+        m_memoryCueMarks.clear();
+        m_nextMemoryCuePriority = -1000;
         m_pDefaultMark.reset();
     }
 
     void addMark(WaveformMarkPointer pMark) {
         m_marks.push_back(pMark);
     }
+
+    void syncMemoryCueMarks(const QString& group,
+            const QList<CuePointer>& cues,
+            int dimBrightThreshold,
+            const WaveformSignalColors& signalColors);
 
     std::optional<WaveformMark::WaveformMarkConstructionError> setDefault(const QString& group,
             const DefaultMarkerStyle& model,
@@ -86,6 +94,8 @@ class WaveformMarkSet {
     QList<WaveformMarkPointer> m_marksToRender;
 
     QMap<int, WaveformMarkPointer> m_hotCueMarks;
+    std::map<const Cue*, WaveformMarkPointer> m_memoryCueMarks;
+    int m_nextMemoryCuePriority{-1000};
 
     DISALLOW_COPY_AND_ASSIGN(WaveformMarkSet);
 };

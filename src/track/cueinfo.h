@@ -19,6 +19,8 @@ enum class CueType {
     Outro = 7,
     N60dBSound = 8, // range that covers beginning and end of audible
                     // sound; not shown to user
+    // Stable database cue type; intentionally distinct from sequential hotcues.
+    Memory = 19,
 };
 
 enum class CueFlag {

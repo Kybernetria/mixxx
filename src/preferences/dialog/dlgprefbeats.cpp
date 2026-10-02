@@ -28,7 +28,7 @@ DlgPrefBeats::DlgPrefBeats(QWidget* parent, UserSettingsPointer pConfig)
 
     // Connections
     connect(comboBoxBeatPlugin,
-            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            QOverload<int>::of(&QComboBox::activated),
             this,
             &DlgPrefBeats::pluginSelected);
     connect(checkBoxAnalyzerEnabled,
@@ -169,7 +169,11 @@ void DlgPrefBeats::updateGui() {
         }
         if (!found) {
             comboBoxBeatPlugin->setCurrentIndex(0);
-            m_selectedAnalyzerId = m_availablePlugins[0].id();
+            // Display the available fallback without rewriting a legacy selection.
+            // Only explicit user activation (or reset) changes analyzer identity.
+            if (m_selectedAnalyzerId != QStringLiteral("mixxxbpmdetection")) {
+                m_selectedAnalyzerId = m_availablePlugins[0].id();
+            }
         }
     }
 

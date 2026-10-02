@@ -8,7 +8,6 @@
 #include "analyzer/analyzertrack.h"
 #include "analyzer/constants.h"
 #include "analyzer/plugins/analyzerqueenmarybeats.h"
-#include "analyzer/plugins/analyzersoundtouchbeats.h"
 #include "library/rekordbox/rekordboxconstants.h"
 #include "track/beatfactory.h"
 #include "track/track.h"
@@ -18,7 +17,6 @@ QList<mixxx::AnalyzerPluginInfo> AnalyzerBeats::availablePlugins() {
     QList<mixxx::AnalyzerPluginInfo> plugins;
     // First one below is the default
     plugins.append(mixxx::AnalyzerQueenMaryBeats::pluginInfo());
-    plugins.append(mixxx::AnalyzerSoundTouchBeats::pluginInfo());
     return plugins;
 }
 
@@ -105,8 +103,6 @@ bool AnalyzerBeats::initialize(const AnalyzerTrack& track,
     if (bShouldAnalyze) {
         if (m_pluginId == mixxx::AnalyzerQueenMaryBeats::pluginInfo().id()) {
             m_pPlugin = std::make_unique<mixxx::AnalyzerQueenMaryBeats>();
-        } else if (m_pluginId == mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
-            m_pPlugin = std::make_unique<mixxx::AnalyzerSoundTouchBeats>();
         } else {
             // This must not happen, because we have already verified above
             // that the PlugInId is valid
@@ -164,8 +160,15 @@ bool AnalyzerBeats::shouldAnalyze(TrackPointer pTrack) const {
         return m_bPreferencesReanalyzeImported;
     }
 
-    if (subVersion.isEmpty() && pBeats->firstBeat() <= mixxx::audio::kStartFramePos &&
-            m_pluginId != mixxx::AnalyzerSoundTouchBeats::pluginInfo().id()) {
+    // A removed analyzer preference falls back to Queen Mary for new analysis.
+    // Do not treat that fallback as a settings change for existing valid grids:
+    // doing so would replace the stored grid on every load while the preference
+    // still names SoundTouch. Imported-grid reanalysis remains an explicit option.
+    if (m_bpmSettings.getBeatPluginId() == QStringLiteral("mixxxbpmdetection")) {
+        return false;
+    }
+
+    if (subVersion.isEmpty() && pBeats->firstBeat() <= mixxx::audio::kStartFramePos) {
         // This happens if the beat grid was created from the metadata BPM value.
         qDebug() << "First beat is 0 for grid so analyzing track to find first beat.";
         return true;

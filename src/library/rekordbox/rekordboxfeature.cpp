@@ -25,6 +25,7 @@
 #include "track/beats.h"
 #include "track/cue.h"
 #include "track/keyfactory.h"
+#include "track/memorycues.h"
 #include "track/track.h"
 #include "util/color/color.h"
 #include "util/db/dbconnectionpooled.h"
@@ -1073,7 +1074,7 @@ void readAnalyze(TrackPointer track,
                 [](const memory_cue_loop_t& a, const memory_cue_loop_t& b)
                         -> bool { return a.startPosition < b.startPosition; });
 
-        bool mainCueFound = false;
+        CuePointer firstMemoryCue;
 
         // Add memory cues and loops
         for (int memoryCueOrLoopIndex = 0;
@@ -1081,13 +1082,14 @@ void readAnalyze(TrackPointer track,
                 memoryCueOrLoopIndex++) {
             memory_cue_loop_t memoryCueOrLoop = memoryCuesAndLoops[memoryCueOrLoopIndex];
 
-            if (!mainCueFound && !memoryCueOrLoop.endPosition.isValid()) {
-                // Set first chronological memory cue as Mixxx MainCue
-                track->setMainCuePosition(memoryCueOrLoop.startPosition);
-                CuePointer pMainCue = track->findCueByType(mixxx::CueType::MainCue);
-                pMainCue->setLabel(memoryCueOrLoop.comment);
-                pMainCue->setColor(*memoryCueOrLoop.color);
-                mainCueFound = true;
+            if (!memoryCueOrLoop.endPosition.isValid()) {
+                const auto memoryCue = MemoryCues::importPoint(*track,
+                        memoryCueOrLoop.startPosition,
+                        memoryCueOrLoop.comment,
+                        memoryCueOrLoop.color);
+                if (!firstMemoryCue) {
+                    firstMemoryCue = memoryCue;
+                }
             } else {
                 // Mixxx v2.4 will feature multiple loops, so these saved here will be usable
                 // For 2.3, Mixxx treats them as hotcues and the first one will be loaded as the single loop Mixxx supports
@@ -1100,6 +1102,14 @@ void readAnalyze(TrackPointer track,
                         memoryCueOrLoop.comment,
                         memoryCueOrLoop.color);
             }
+        }
+        if (firstMemoryCue) {
+            // Keep the first chronological point as a separate MainCue too,
+            // after basic/extended memory records have merged their metadata.
+            track->setMainCuePosition(firstMemoryCue->getPosition());
+            const auto mainCue = track->findCueByType(mixxx::CueType::MainCue);
+            mainCue->setLabel(firstMemoryCue->getLabel());
+            mainCue->setColor(firstMemoryCue->getColor());
         }
     }
 }

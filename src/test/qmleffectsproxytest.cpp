@@ -10,18 +10,21 @@
 #include "effects/presets/effectchainpreset.h"
 #include "effects/presets/effectchainpresetmanager.h"
 #include "engine/channelhandle.h"
+#include "engine/effects/engineeffectsmanager.h"
 #include "qml/qmlchainpresetmodel.h"
 #include "qml/qmleffectslotparametersmodel.h"
 #include "qml/qmleffectslotproxy.h"
 #include "qml/qmleffectsmanagerproxy.h"
 #include "qml/qmleffectunitproxy.h"
 #include "test/mixxxtest.h"
+#include "util/time.h"
 
 namespace {
 
 class QmlEffectsProxyTest : public MixxxTest {
   protected:
     void SetUp() override {
+        mixxx::Time::start();
         auto pChannelHandleFactory = std::make_shared<ChannelHandleFactory>();
         m_pEffectsManager =
                 std::make_shared<EffectsManager>(config(), pChannelHandleFactory);
@@ -43,6 +46,9 @@ class QmlEffectsProxyTest : public MixxxTest {
             EXPECT_TRUE(pChain->isEmpty());
             EXPECT_TRUE(pChain->presetName().isEmpty());
         }
+        // This GUI-only fixture has no mixer callback to acknowledge queued
+        // additions/removals. Complete that handoff before GUI reclamation.
+        m_pEffectsManager->getEngineEffectsManager()->onCallbackStart();
         m_pEffectsManager.reset();
     }
 

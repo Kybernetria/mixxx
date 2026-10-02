@@ -7,6 +7,7 @@
 
 #include "control/controlobject.h"
 #include "engine/cachingreader/cachingreader.h"
+#include "engine/cachingreader/cachingreaderchunk.h"
 #include "engine/controls/cuecontrol.h"
 #include "engine/controls/loopingcontrol.h"
 #include "test/mixxxtest.h"
@@ -33,8 +34,9 @@ class StubReader : public CachingReader {
         Q_UNUSED(reverse);
         Q_UNUSED(channelCount);
         SampleUtil::clear(buffer, numSamples);
-        return CachingReader::ReadResult::AVAILABLE;
+        return miss ? CachingReader::ReadResult::UNAVAILABLE : CachingReader::ReadResult::AVAILABLE;
     }
+    bool miss = false;
 };
 
 class StubLoopControl : public LoopingControl {
@@ -115,6 +117,9 @@ class ReadAheadManagerTest : public MixxxTest {
               m_trackSamplesCO(ConfigKey(kGroup, "track_samples")),
               m_pBuffer(SampleUtil::alloc(MAX_BUFFER_LEN)) {
     }
+    ~ReadAheadManagerTest() override {
+        SampleUtil::free(m_pBuffer);
+    }
 
   protected:
     void SetUp() override {
@@ -147,6 +152,46 @@ class ReadAheadManagerTest : public MixxxTest {
     QScopedPointer<StubCueControl> m_pCueControl;
     QScopedPointer<ReadAheadManager> m_pReadAheadManager;
 };
+
+TEST_F(ReadAheadManagerTest, StretchChunkBoundaryAndMissAreTransactional) {
+    const SINT boundary = CachingReaderChunk::kFrames * 2;
+    for (int i = 0; i < 4; ++i) {
+        m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+        m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    }
+    m_pReadAheadManager->notifySeek(boundary - 2);
+    const auto prefix = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 1024, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(prefix.unavailable);
+    EXPECT_EQ(2, prefix.samplesRead);
+    EXPECT_EQ(boundary, m_pReadAheadManager->getPlaypos());
+    EXPECT_EQ(boundary, m_pReadAheadManager->getFilePlaypositionFromLog(boundary - 2, 2));
+    m_pReader->miss = true;
+    const auto miss = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 1024, mixxx::audio::ChannelCount::stereo());
+    EXPECT_TRUE(miss.unavailable);
+    EXPECT_EQ(0, miss.samplesRead);
+    EXPECT_EQ(boundary, m_pReadAheadManager->getPlaypos());
+    m_pReader->miss = false;
+    const auto retry = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 1024, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(retry.unavailable);
+    EXPECT_EQ(1024, retry.samplesRead);
+    EXPECT_EQ(boundary + 1024, m_pReadAheadManager->getFilePlaypositionFromLog(boundary, 1024));
+}
+
+TEST_F(ReadAheadManagerTest, StretchReverseStopsAtCacheBoundary) {
+    const SINT boundary = CachingReaderChunk::kFrames * 2;
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReadAheadManager->notifySeek(boundary + 2);
+    const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+            -1, m_pBuffer, 1024, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(read.unavailable);
+    EXPECT_EQ(2, read.samplesRead);
+    EXPECT_EQ(boundary, m_pReadAheadManager->getPlaypos());
+    EXPECT_EQ(boundary, m_pReadAheadManager->getFilePlaypositionFromLog(boundary + 2, 2));
+}
 
 TEST_F(ReadAheadManagerTest, SavedJump) {
     m_pReadAheadManager->notifySeek(0.5);

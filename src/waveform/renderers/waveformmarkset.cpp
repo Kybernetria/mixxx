@@ -67,6 +67,73 @@ void WaveformMarkSet::setup(const QString& group, const QDomNode& node,
     }
 }
 
+void WaveformMarkSet::syncMemoryCueMarks(const QString& group,
+        const QList<CuePointer>& cues,
+        int dimBrightThreshold,
+        const WaveformSignalColors& signalColors) {
+    WaveformMarkPointer style = m_pDefaultMark;
+    if (!style) {
+        for (int i = 0; i < kMaxNumberOfHotcues && !style; ++i) {
+            style = m_hotCueMarks.value(i);
+        }
+    }
+
+    std::set<const Cue*> currentCues;
+    for (const CuePointer& cue : cues) {
+        if (!cue || cue->getType() != mixxx::CueType::Memory) {
+            continue;
+        }
+        const double position = cue->getPosition().toEngineSamplePosMaybeInvalid();
+        if (position == Cue::kNoPosition) {
+            continue;
+        }
+
+        currentCues.insert(cue.get());
+        auto it = m_memoryCueMarks.find(cue.get());
+        if (it == m_memoryCueMarks.end()) {
+            if (!style) {
+                continue;
+            }
+            auto maybeMark = WaveformMark::create(group,
+                    QString(),
+                    QString(),
+                    style->m_textColor.name(QColor::HexArgb),
+                    QStringLiteral("AlignBottom"),
+                    cue->getLabel(),
+                    style->m_pixmapPath,
+                    style->m_iconPath,
+                    QColor(),
+                    m_nextMemoryCuePriority--,
+                    Cue::kNoHotCue,
+                    signalColors);
+            if (std::holds_alternative<WaveformMark::WaveformMarkConstructionError>(maybeMark)) {
+                continue;
+            }
+            auto mark = std::get<WaveformMarkPointer>(maybeMark);
+            mark->setCue(cue);
+            mark->setSamplePosition(position);
+            mark->setBaseColor(mixxx::RgbColor::toQColor(cue->getColor()), dimBrightThreshold);
+            m_marks.push_back(mark);
+            m_memoryCueMarks.emplace(cue.get(), mark);
+            continue;
+        }
+
+        auto& mark = it->second;
+        mark->setSamplePosition(position);
+        mark->setText(cue->getLabel());
+        mark->setBaseColor(mixxx::RgbColor::toQColor(cue->getColor()), dimBrightThreshold);
+    }
+
+    for (auto it = m_memoryCueMarks.begin(); it != m_memoryCueMarks.end();) {
+        if (!currentCues.contains(it->first)) {
+            m_marks.removeAll(it->second);
+            it = m_memoryCueMarks.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 std::optional<WaveformMark::WaveformMarkConstructionError>
 WaveformMarkSet::setDefault(const QString& group,
         const DefaultMarkerStyle& model,

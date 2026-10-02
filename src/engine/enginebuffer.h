@@ -19,10 +19,6 @@
 #include "track/track_decl.h"
 #include "util/types.h"
 
-#ifdef __RUBBERBAND__
-#include "engine/bufferscalers/enginebufferscalerubberband.h"
-#endif
-
 //for the writer
 #ifdef __SCALER_DEBUG__
 #include <QFile>
@@ -39,6 +35,7 @@ class VinylControlControl;
 class LoopingControl;
 class ClockControl;
 class CueControl;
+class MemoryCueControl;
 class ReadAheadManager;
 class ControlObject;
 class ControlProxy;
@@ -46,7 +43,7 @@ class ControlPushButton;
 class ControlPotmeter;
 class EngineBufferScale;
 class EngineBufferScaleLinear;
-class EngineBufferScaleST;
+class EngineBufferScaleSignalsmith;
 class EngineSync;
 class EngineWorkerScheduler;
 class VisualPlayPosition;
@@ -85,22 +82,18 @@ class EngineBuffer : public EngineObject {
     // Don't remove or swap values to keep backward compatibility
     enum class KeylockEngine {
         SoundTouch = 0,
-#ifdef __RUBBERBAND__
         RubberBandFaster = 1,
         RubberBandFiner = 2,
         RubberBandR3ShortWindow = 3,
-#endif
+        // 4 is reserved for the historical fork's Bungee backend.
+        Reserved = 4,
+        Signalsmith = 5,
     };
     Q_ENUM(KeylockEngine);
 
     // intended for iteration over the KeylockEngine enum
     constexpr static std::initializer_list<KeylockEngine> kKeylockEngines = {
-            KeylockEngine::SoundTouch,
-#ifdef __RUBBERBAND__
-            KeylockEngine::RubberBandFaster,
-            KeylockEngine::RubberBandFiner,
-            KeylockEngine::RubberBandR3ShortWindow,
-#endif
+            KeylockEngine::Signalsmith,
     };
 
     EngineBuffer(const QString& group,
@@ -174,54 +167,19 @@ class EngineBuffer : public EngineObject {
     void loadFakeTrack(TrackPointer pTrack, bool bPlay);
 
     static QString getKeylockEngineName(KeylockEngine engine) {
-        switch (engine) {
-        case KeylockEngine::SoundTouch:
-            return tr("Soundtouch (fastest, low quality)");
-#ifdef __RUBBERBAND__
-        case KeylockEngine::RubberBandFaster:
-            return tr("Rubberband (fast, medium quality)");
-        case KeylockEngine::RubberBandFiner:
-            if (EngineBufferScaleRubberBand::isEngineFinerAvailable()) {
-                return tr("Rubberband R3 MW (slow, highest quality)");
-            }
-            [[fallthrough]];
-        case KeylockEngine::RubberBandR3ShortWindow:
-            if (EngineBufferScaleRubberBand::isEngineFinerAvailable()) {
-                return tr("Rubberband R3 SW (fast, high quality)");
-            }
-            [[fallthrough]];
-#endif
-        default:
-#ifdef __RUBBERBAND__
-            return tr("Unknown, using Rubberband (fast, medium quality)");
-#else
-            return tr("Unknown, using Soundtouch (fastest, low quality)");
-#endif
-        }
+        return engine == KeylockEngine::Signalsmith
+                ? tr("Signalsmith Stretch")
+                : tr("Unknown, using Signalsmith Stretch");
     }
 
     static bool isKeylockEngineAvailable(KeylockEngine engine) {
-        switch (engine) {
-        case KeylockEngine::SoundTouch:
-            return true;
-#ifdef __RUBBERBAND__
-        case KeylockEngine::RubberBandFaster:
-            return true;
-        case KeylockEngine::RubberBandFiner:
-        case KeylockEngine::RubberBandR3ShortWindow:
-            return EngineBufferScaleRubberBand::isEngineFinerAvailable();
-#endif
-        default:
-            return false;
-        }
+        return engine == KeylockEngine::Signalsmith;
     }
 
+    static KeylockEngine resolveKeylockEngine(double savedId);
+
     constexpr static KeylockEngine defaultKeylockEngine() {
-#ifdef __RUBBERBAND__
-        return KeylockEngine::RubberBandFaster;
-#else
-        return KeylockEngine::SoundTouch;
-#endif
+        return KeylockEngine::Signalsmith;
     }
 
     // Request that the EngineBuffer load a track. Since the process is
@@ -250,6 +208,10 @@ class EngineBuffer : public EngineObject {
     void seekExact(mixxx::audio::FramePos);
 
     void verifyPlay();
+
+#ifdef BUILD_TESTING
+    void setKeylockPreparationPausedForTest(bool paused);
+#endif
 
     void slipQuitAndAdopt();
 
@@ -354,6 +316,7 @@ class EngineBuffer : public EngineObject {
     FRIEND_TEST(CueControlTest, SeekOnSetCueCDJ);
     FRIEND_TEST(CueControlTest, SeekOnSetCuePlay);
     CueControl* m_pCueControl;
+    MemoryCueControl* m_pMemoryCueControl;
 
     QList<EngineControl*> m_engineControls;
 
@@ -377,6 +340,9 @@ class EngineBuffer : public EngineObject {
     // It can differ form m_speed_old which holds the requested speed.
     // It is the average of one fuffer, in case speed ramping is applied in the scalers.
     double m_actual_speed;
+
+    // Callback-owned delivered rate for Signalsmith visual/clock extrapolation.
+    double m_renderedIndicatorSpeed;
 
     // The previous callback's tempo ratio.
     double m_tempo_ratio_old;
@@ -454,24 +420,23 @@ class EngineBuffer : public EngineObject {
     // Object used to perform waveform scaling (sample rate conversion).  These
     // three pointers may be reassigned depending on configuration and tests.
     EngineBufferScale* m_pScale;
-    FRIEND_TEST(EngineBufferTest, SlowRubberBand);
+
+    FRIEND_TEST(EngineBufferTest, SlowRateUsesLinearScaler);
     FRIEND_TEST(EngineBufferTest, ResetPitchAdjustUsesLinear);
     FRIEND_TEST(EngineBufferTest, VinylScalerRampZero);
     FRIEND_TEST(EngineBufferTest, ReadFadeOut);
     FRIEND_TEST(EngineBufferTest, RateTempTest);
     FRIEND_TEST(EngineBufferTest, RatePermTest);
     EngineBufferScale* m_pScaleVinyl;
-    // The keylock engine is configurable, so it could flip flop between
-    // ScaleST and ScaleRB during a single callback.
-    EngineBufferScale* volatile m_pScaleKeylock;
+    // Atomically publish the selected keylock scaler to the audio callback.
+    static_assert(std::atomic<EngineBufferScale*>::is_always_lock_free);
+    std::atomic<EngineBufferScale*> m_pScaleKeylock{nullptr};
+    EngineBufferScale* m_callbackKeylockScale = nullptr; // callback-only format/selection snapshot
 
     // Object used for vinyl-style interpolation scaling of the audio
     EngineBufferScaleLinear* m_pScaleLinear;
-    // Objects used for pitch-indep time stretch (key lock) scaling of the audio
-    EngineBufferScaleST* m_pScaleST;
-#ifdef __RUBBERBAND__
-    EngineBufferScaleRubberBand* m_pScaleRB;
-#endif
+    // Object used for pitch-independent time stretch (key lock) scaling.
+    EngineBufferScaleSignalsmith* m_pScaleSignalsmith;
 
     // Indicates whether the scaler has changed since the last process()
     bool m_bScalerChanged;

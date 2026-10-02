@@ -20,7 +20,6 @@
 #include <lame/lame.h>
 #include <portaudio.h>
 #include <sndfile.h>
-#include <soundtouch/SoundTouch.h>
 #include <taglib.h>
 #include <vorbis/codec.h>
 
@@ -187,8 +186,6 @@ QStringList VersionStore::dependencyVersions() {
             // The version of the RubberBand headers Mixxx was compiled with.
             QStringLiteral("RubberBand: " RUBBERBAND_VERSION),
 #endif
-            // The version of the SoundTouch headers Mixxx was compiled with.
-            QStringLiteral("SoundTouch: " SOUNDTOUCH_VERSION),
             // The version of the TagLib headers Mixxx was compiled with.
             QStringLiteral("TagLib: " STR(TAGLIB_MAJOR_VERSION) "." STR(
                     TAGLIB_MINOR_VERSION) "." STR(TAGLIB_PATCH_VERSION)),

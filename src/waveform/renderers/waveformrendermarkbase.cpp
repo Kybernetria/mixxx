@@ -54,12 +54,18 @@ void WaveformRenderMarkBase::slotCuesUpdated() {
 
 void WaveformRenderMarkBase::updateMarksFromCues() {
     const TrackPointer pTrackInfo = m_waveformRenderer->getTrackInfo();
+    const QList<CuePointer> loadedCues = pTrackInfo ? pTrackInfo->getCuePoints()
+                                                    : QList<CuePointer>{};
+    const int dimBrightThreshold = m_waveformRenderer->getDimBrightThreshold();
+    m_marks.syncMemoryCueMarks(m_waveformRenderer->getGroup(),
+            loadedCues,
+            dimBrightThreshold,
+            *m_waveformRenderer->getWaveformSignalColors());
     if (!pTrackInfo) {
+        updateMarks();
         return;
     }
 
-    const int dimBrightThreshold = m_waveformRenderer->getDimBrightThreshold();
-    const QList<CuePointer> loadedCues = pTrackInfo->getCuePoints();
     for (const CuePointer& pCue : loadedCues) {
         const int hotCue = pCue->getHotCue();
         if (hotCue == Cue::kNoHotCue) {

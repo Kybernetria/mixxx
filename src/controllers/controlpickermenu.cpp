@@ -530,6 +530,36 @@ ControlPickerMenu::ControlPickerMenu(QWidget* pParent)
     QMenu* pCueMenu = addSubmenu(tr("Cues"));
     addDeckAndSamplerControl("cue_default", tr("Cue"), tr("Cue button"), pCueMenu);
     addDeckAndSamplerControl("cue_set", tr("Set Cue"), tr("Set cue point"), pCueMenu);
+    QMenu* memoryCueMenu = pCueMenu->addMenu(tr("Memory Cues"));
+    addDeckAndSamplerControl("memory_cue_set", tr("Store"), tr("Store memory cue"), memoryCueMenu);
+    addDeckAndSamplerControl("memory_cue_next",
+            tr("Next"),
+            tr("Next memory cue, no wrap"),
+            memoryCueMenu);
+    addDeckAndSamplerControl("memory_cue_prev",
+            tr("Previous"),
+            tr("Previous memory cue, no wrap"),
+            memoryCueMenu);
+    addDeckAndSamplerControl("memory_cue_clear",
+            tr("Delete Current"),
+            tr("Delete memory cue at current position"),
+            memoryCueMenu);
+    addDeckAndSamplerControl("memory_cue_clear_nearest",
+            tr("Delete Nearest"),
+            tr("Delete nearest memory cue within one second"),
+            memoryCueMenu);
+    addDeckAndSamplerControl("memory_cue_clear_prev",
+            tr("Delete Previous"),
+            tr("Delete previous memory cue"),
+            memoryCueMenu);
+    addDeckAndSamplerControl("memory_cue_clear_next",
+            tr("Delete Next"),
+            tr("Delete next memory cue"),
+            memoryCueMenu);
+    addDeckAndSamplerControl("memory_cue_clear_all",
+            tr("Delete All"),
+            tr("Delete all memory cues"),
+            memoryCueMenu);
     addDeckAndSamplerControl(
             "cue_goto", tr("Go-To Cue"), tr("Go to cue point"), pCueMenu);
     addDeckAndSamplerAndPreviewDeckControl("cue_gotoandplay",

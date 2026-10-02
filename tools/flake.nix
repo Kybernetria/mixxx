@@ -33,7 +33,6 @@
           protobuf
           rubberband
           libsndfile
-          soundtouch
           taglib
           upower
           openssl

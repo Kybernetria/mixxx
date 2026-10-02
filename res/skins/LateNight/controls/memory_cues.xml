@@ -1,0 +1,48 @@
+<Template>
+  <WidgetGroup>
+    <Layout>vertical</Layout>
+    <SizePolicy>max,min</SizePolicy>
+    <Children>
+      <WidgetGroup>
+        <Layout>horizontal</Layout>
+        <Children>
+          <PushButton>
+            <Size>26f,26f</Size><NumberStates>1</NumberStates>
+            <Tooltip>Previous memory cue (no wrap)</Tooltip>
+            <State><Number>0</Number><Text>M−</Text></State>
+            <Connection><ConfigKey><Variable name="Group"/>,memory_cue_prev</ConfigKey></Connection>
+          </PushButton>
+          <PushButton>
+            <Size>26f,26f</Size><NumberStates>1</NumberStates>
+            <Tooltip>Store memory cue at current position (quantized when enabled)</Tooltip>
+            <State><Number>0</Number><Text>Set</Text></State>
+            <Connection><ConfigKey><Variable name="Group"/>,memory_cue_set</ConfigKey></Connection>
+          </PushButton>
+          <PushButton>
+            <Size>26f,26f</Size><NumberStates>1</NumberStates>
+            <Tooltip>Next memory cue (no wrap)</Tooltip>
+            <State><Number>0</Number><Text>M+</Text></State>
+            <Connection><ConfigKey><Variable name="Group"/>,memory_cue_next</ConfigKey></Connection>
+          </PushButton>
+        </Children>
+      </WidgetGroup>
+      <WidgetGroup>
+        <Layout>horizontal</Layout>
+        <Children>
+          <PushButton>
+            <Size>39f,26f</Size><NumberStates>1</NumberStates>
+            <Tooltip>Delete nearest memory cue within one second</Tooltip>
+            <State><Number>0</Number><Text>Del</Text></State>
+            <Connection><ConfigKey><Variable name="Group"/>,memory_cue_clear_nearest</ConfigKey></Connection>
+          </PushButton>
+          <MemoryCueButton>
+            <Group><Variable name="Group"/></Group>
+            <Size>39f,26f</Size><NumberStates>1</NumberStates>
+            <Tooltip>Edit label/color or delete nearest memory cue within one second</Tooltip>
+            <State><Number>0</Number><Text>Edit</Text></State>
+          </MemoryCueButton>
+        </Children>
+      </WidgetGroup>
+    </Children>
+  </WidgetGroup>
+</Template>

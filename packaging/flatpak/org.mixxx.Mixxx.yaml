@@ -49,7 +49,6 @@ modules:
   - modules/hidapi.yaml
   - modules/chromaprint.yaml
   - modules/rubberband.yaml
-  - modules/soundtouch.yaml
   - modules/libid3tag.yaml
   - modules/upower.yaml
   - modules/fdk-aac-free.yaml

@@ -1,5 +1,7 @@
 #include "track/cue.h"
 
+#include <algorithm>
+
 #include "audio/frame.h"
 #include "moc_cue.cpp"
 #include "util/assert.h"
@@ -123,6 +125,53 @@ DbId Cue::getId() const {
     return m_dbId;
 }
 
+void Cue::attachRevisionToken(
+        const std::shared_ptr<std::atomic<std::uint64_t>>& token) {
+    const auto lock = lockMutex(&m_mutex);
+    if (m_revisionToken == token ||
+            std::find(m_additionalRevisionTokens.begin(),
+                    m_additionalRevisionTokens.end(),
+                    token) !=
+                    m_additionalRevisionTokens.end()) {
+        return;
+    }
+    if (!m_revisionToken) {
+        m_revisionToken = token;
+    } else {
+        m_additionalRevisionTokens.push_back(token);
+    }
+}
+
+void Cue::detachRevisionToken(
+        const std::shared_ptr<std::atomic<std::uint64_t>>& token) {
+    const auto lock = lockMutex(&m_mutex);
+    if (m_revisionToken == token) {
+        if (m_additionalRevisionTokens.empty()) {
+            m_revisionToken.reset();
+        } else {
+            m_revisionToken = std::move(m_additionalRevisionTokens.back());
+            m_additionalRevisionTokens.pop_back();
+        }
+        return;
+    }
+    const auto it = std::find(
+            m_additionalRevisionTokens.begin(),
+            m_additionalRevisionTokens.end(),
+            token);
+    if (it != m_additionalRevisionTokens.end()) {
+        m_additionalRevisionTokens.erase(it);
+    }
+}
+
+void Cue::advanceRevisionLocked() {
+    if (m_revisionToken) {
+        m_revisionToken->fetch_add(1, std::memory_order_release);
+    }
+    for (const auto& token : m_additionalRevisionTokens) {
+        token->fetch_add(1, std::memory_order_release);
+    }
+}
+
 void Cue::setId(DbId cueId) {
     const auto lock = lockMutex(&m_mutex);
     m_dbId = cueId;
@@ -145,6 +194,7 @@ void Cue::setType(mixxx::CueType type) {
         return;
     }
     m_type = type;
+    advanceRevisionLocked();
     m_bDirty = true;
     lock.unlock();
     emit updated();
@@ -161,6 +211,7 @@ void Cue::setStartPosition(mixxx::audio::FramePos position) {
         return;
     }
     m_startPosition = position;
+    advanceRevisionLocked();
     m_bDirty = true;
     lock.unlock();
     emit updated();
@@ -172,6 +223,7 @@ void Cue::setEndPosition(mixxx::audio::FramePos position) {
         return;
     }
     m_endPosition = position;
+    advanceRevisionLocked();
     m_bDirty = true;
     lock.unlock();
     emit updated();
@@ -187,6 +239,7 @@ void Cue::setStartAndEndPosition(
     }
     m_startPosition = startPosition;
     m_endPosition = endPosition;
+    advanceRevisionLocked();
     m_bDirty = true;
     lock.unlock();
     emit updated();
@@ -199,11 +252,16 @@ Cue::StartAndEndPositions Cue::getStartAndEndPosition() const {
 
 void Cue::shiftPositionFrames(mixxx::audio::FrameDiff_t frameOffset) {
     auto lock = lockMutex(&m_mutex);
+    const auto oldStart = m_startPosition;
+    const auto oldEnd = m_endPosition;
     if (m_startPosition.isValid()) {
         m_startPosition += frameOffset;
     }
     if (m_endPosition.isValid()) {
         m_endPosition += frameOffset;
+    }
+    if (m_startPosition != oldStart || m_endPosition != oldEnd) {
+        advanceRevisionLocked();
     }
     m_bDirty = true;
     lock.unlock();
@@ -230,6 +288,7 @@ void Cue::setHotCue(int n) {
         return;
     }
     m_iHotCue = n;
+    advanceRevisionLocked();
 }
 
 int Cue::getHotCue() const {
@@ -248,6 +307,7 @@ void Cue::setLabel(const QString& label) {
         return;
     }
     m_label = label;
+    advanceRevisionLocked();
     m_bDirty = true;
     lock.unlock();
     emit updated();
@@ -264,6 +324,7 @@ void Cue::setColor(mixxx::RgbColor color) {
         return;
     }
     m_color = color;
+    advanceRevisionLocked();
     m_bDirty = true;
     lock.unlock();
     emit updated();

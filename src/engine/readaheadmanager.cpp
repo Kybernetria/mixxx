@@ -44,7 +44,42 @@ SINT ReadAheadManager::getNextSamples(double dRate,
         CSAMPLE* pOutput,
         SINT requested_samples,
         mixxx::audio::ChannelCount channelCount) {
-    // qDebug() << "getNextSamples:" << m_currentPosition << requested_samples;
+    bool unavailable = false;
+    return readNextSamples(dRate, pOutput, requested_samples, channelCount, false, &unavailable);
+}
+
+ReadAheadManager::StretchReadResult ReadAheadManager::getNextSamplesForStretch(
+        double rate,
+        CSAMPLE* buffer,
+        SINT requestedSamples,
+        mixxx::audio::ChannelCount channelCount) {
+    if (requestedSamples <= 0 || channelCount <= 0 ||
+            requestedSamples % channelCount != 0 || m_readLogSize == kReadLogCapacity) {
+        return {0, true};
+    }
+    const SINT chunkSamples = CachingReaderChunk::kFrames * channelCount;
+    const SINT start = SampleUtil::roundPlayPosToFrameStart(m_currentPosition, channelCount);
+    const SINT offset = ((start % chunkSamples) + chunkSamples) % chunkSamples;
+    const SINT untilBoundary = rate < 0
+            ? (offset == 0 ? chunkSamples : offset)
+            : chunkSamples - offset;
+    bool unavailable = false;
+    const SINT read = readNextSamples(rate,
+            buffer,
+            std::min(requestedSamples, untilBoundary),
+            channelCount,
+            true,
+            &unavailable);
+    return {read, unavailable};
+}
+
+SINT ReadAheadManager::readNextSamples(double dRate,
+        CSAMPLE* pOutput,
+        SINT requested_samples,
+        mixxx::audio::ChannelCount channelCount,
+        bool suspendOnMiss,
+        bool* unavailable) {
+    *unavailable = false;
 
     int modSamples = requested_samples % channelCount;
     if (modSamples != 0) {
@@ -150,6 +185,10 @@ SINT ReadAheadManager::getNextSamples(double dRate,
         // Set the cache miss flag to decide when to apply ramping
         // after the following read attempts.
         m_cacheMissCount++;
+        if (suspendOnMiss) {
+            *unavailable = true;
+            return 0;
+        }
     } else if (m_cacheMissCount > 0) {
         // Previous read was a cache miss, but now we got something back.
         // Apply ramping gain, because the last buffer has unwanted silence
@@ -159,7 +198,7 @@ SINT ReadAheadManager::getNextSamples(double dRate,
                 CSAMPLE_GAIN_ONE,
                 samples_from_reader);
         // Reset the cache miss flag, because we are now back on track.
-        if (!m_cacheMissExpected) {
+        if (!m_cacheMissExpected && !suspendOnMiss) {
             qDebug() << "ReadAheadManager: continue after number cache misses:" << m_cacheMissCount;
         }
         m_cacheMissCount = 0;
@@ -240,7 +279,9 @@ SINT ReadAheadManager::getNextSamples(double dRate,
                     m_pCrossFadeBuffer,
                     channelCount);
             if (readResult == CachingReader::ReadResult::UNAVAILABLE) {
-                qDebug() << "ERROR: Couldn't get all needed samples for crossfade.";
+                if (!suspendOnMiss) {
+                    qDebug() << "ERROR: Couldn't get all needed samples for crossfade.";
+                }
                 // Cache miss - no samples written
                 SampleUtil::clear(m_pCrossFadeBuffer, samples_from_reader);
                 // Set the cache miss flag to decide when to apply ramping
@@ -278,7 +319,8 @@ void ReadAheadManager::notifySeek(double seekPosition) {
     m_currentPosition = seekPosition;
     m_cacheMissCount = 0;
     m_cacheMissExpected = true;
-    m_readAheadLog.clear();
+    m_readLogStart = 0;
+    m_readLogSize = 0;
 }
 
 void ReadAheadManager::hintReader(double dRate,
@@ -287,8 +329,7 @@ void ReadAheadManager::hintReader(double dRate,
     bool in_reverse = dRate < 0;
     Hint current_position;
 
-    // SoundTouch can read up to 2 chunks ahead. Always keep 2 chunks ahead in
-    // cache.
+    // Always keep 2 chunks ahead in cache for stretch processing.
     SINT frameCountToCache = 2 * CachingReaderChunk::kFrames;
     current_position.frameCount = frameCountToCache;
 
@@ -320,13 +361,19 @@ void ReadAheadManager::addReadLogEntry(double virtualPlaypositionStart,
                                        double virtualPlaypositionEndNonInclusive) {
     ReadLogEntry newEntry(virtualPlaypositionStart,
                           virtualPlaypositionEndNonInclusive);
-    if (m_readAheadLog.size() > 0) {
-        ReadLogEntry& last = m_readAheadLog.back();
+    if (m_readLogSize > 0) {
+        ReadLogEntry& last =
+                m_readAheadLog[(m_readLogStart + m_readLogSize - 1) %
+                        kReadLogCapacity];
         if (last.merge(newEntry)) {
             return;
         }
     }
-    m_readAheadLog.push_back(newEntry);
+    VERIFY_OR_DEBUG_ASSERT(m_readLogSize < kReadLogCapacity) {
+        return;
+    }
+    m_readAheadLog[(m_readLogStart + m_readLogSize) % kReadLogCapacity] = newEntry;
+    ++m_readLogSize;
 }
 
 // Not thread-save, call from engine thread only
@@ -337,7 +384,7 @@ double ReadAheadManager::getFilePlaypositionFromLog(
         return currentFilePlayposition;
     }
 
-    if (m_readAheadLog.size() == 0) {
+    if (m_readLogSize == 0) {
         // No log entries to read from.
         qDebug() << this << "No read ahead log entries to read from. Case not currently handled.";
         // TODO(rryan) log through a stats pipe eventually
@@ -345,15 +392,16 @@ double ReadAheadManager::getFilePlaypositionFromLog(
     }
 
     double filePlayposition = 0;
-    while (m_readAheadLog.size() > 0 && numConsumedSamples > 0) {
-        ReadLogEntry& entry = m_readAheadLog.front();
+    while (m_readLogSize > 0 && numConsumedSamples > 0) {
+        ReadLogEntry& entry = m_readAheadLog[m_readLogStart];
         // Advance our idea of the current virtual playposition to this
         // ReadLogEntry's start position.
         filePlayposition = entry.advancePlayposition(&numConsumedSamples);
 
         if (entry.length() == 0) {
             // This entry is empty now.
-            m_readAheadLog.pop_front();
+            m_readLogStart = (m_readLogStart + 1) % kReadLogCapacity;
+            --m_readLogSize;
         }
     }
 

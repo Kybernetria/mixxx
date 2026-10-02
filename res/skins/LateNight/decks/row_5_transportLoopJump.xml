@@ -13,6 +13,8 @@
         <Layout>horizontal</Layout>
         <Children>
 
+          <Template src="skins:LateNight/controls/memory_cues.xml"/>
+
           <WidgetGroup><!-- Play, Cue, Reverse -->
             <Layout>vertical</Layout>
             <SizePolicy>max,min</SizePolicy>

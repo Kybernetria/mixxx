@@ -5,6 +5,7 @@
 
 #include "control/controlproxy.h"
 #include "moc_wwaveformviewer.cpp"
+#include "track/track.h"
 #include "util/dnd.h"
 #include "util/math.h"
 #include "waveform/waveformwidgetfactory.h"
@@ -243,6 +244,8 @@ void WWaveformViewer::slotTrackUnloaded(TrackPointer pOldTrack) {
 void WWaveformViewer::slotLoadingTrack(TrackPointer pNewTrack, TrackPointer pOldTrack) {
     Q_UNUSED(pNewTrack);
     Q_UNUSED(pOldTrack);
+    leaveEvent(nullptr);
+    m_pCueMenuPopup->hide();
     if (m_waveformWidget) {
         m_waveformWidget->setTrack(TrackPointer());
     }
@@ -332,6 +335,13 @@ void WWaveformViewer::setWaveformWidget(WaveformWidgetAbstract* waveformWidget) 
 
 CuePointer WWaveformViewer::getCuePointerFromCueMark(WaveformMarkPointer pMark) const {
     if (m_waveformWidget && pMark) {
+        if (const auto cue = pMark->getCue()) {
+            const auto track = m_waveformWidget->getTrackInfo();
+            return track && track->getCuePoints().contains(cue) &&
+                            cue->getType() == mixxx::CueType::Memory
+                    ? cue
+                    : CuePointer{};
+        }
         return m_waveformWidget->getCuePointerFromIndex(pMark->getHotCue());
     }
     return {};

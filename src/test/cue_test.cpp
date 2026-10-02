@@ -31,6 +31,21 @@ TEST(CueTest, DefaultCueInfoToCueRoundtrip) {
     EXPECT_EQ(cueInfo1, cueInfo2);
 }
 
+TEST(CueTest, MemoryCueTypeIsStableAndDistinct) {
+    EXPECT_EQ(static_cast<int>(CueType::Memory), 19);
+    EXPECT_NE(CueType::Memory, CueType::HotCue);
+
+    const auto cueInfo = CueInfo(
+            CueType::Memory,
+            std::make_optional(1.0 * 44100 * mixxx::kEngineChannelOutputCount),
+            std::nullopt,
+            std::nullopt,
+            QStringLiteral("memory"),
+            RgbColor::optional(0xABCDEF));
+    const Cue cueObject(cueInfo, audio::SampleRate(44100), true);
+    EXPECT_EQ(cueInfo, cueObject.getCueInfo(audio::SampleRate(44100)));
+}
+
 TEST(CueTest, ConvertCueInfoToCueRoundtrip) {
     // Due to rounding errors this test may fail if the
     // cue position/sample conversions don't always result

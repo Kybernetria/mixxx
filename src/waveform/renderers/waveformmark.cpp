@@ -318,6 +318,12 @@ std::variant<WaveformMarkPointer, WaveformMark::WaveformMarkConstructionError> W
     return pMark;
 }
 
+void WaveformMark::setSamplePosition(double position) {
+    if (m_pPosition != position) {
+        m_pPosition = position;
+    }
+}
+
 WaveformMark::~WaveformMark() = default;
 
 void WaveformMark::setBaseColor(QColor baseColor, int dimBrightThreshold) {

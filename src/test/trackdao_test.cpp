@@ -2,6 +2,8 @@
 #include <gtest/gtest.h>
 
 #include "test/librarytest.h"
+#include "track/beats.h"
+#include "track/cue.h"
 #include "track/globaltrackcache.h"
 #include "track/track.h"
 
@@ -85,6 +87,74 @@ TEST_F(TrackDAOTest, bpmLockPreservedForTrackWithoutBeats) {
     ASSERT_TRUE(pReloaded);
     EXPECT_FALSE(pReloaded->getBeats());
     EXPECT_TRUE(pReloaded->isBpmLocked());
+}
+
+TEST_F(TrackDAOTest, BeatGridMetadataRoundTripsUnchanged) {
+    const mixxx::FileInfo fileInfo(
+            QDir(QDir::tempPath()), QStringLiteral("beatgrid-metadata.mp3"));
+    TrackPointer pTrack = Track::newTemporary(mixxx::FileAccess(fileInfo));
+    pTrack->setAudioProperties(
+            mixxx::audio::ChannelCount(2),
+            mixxx::audio::SampleRate(44100),
+            mixxx::audio::Bitrate(),
+            mixxx::Duration::fromSeconds(180));
+    const auto savedGrid = mixxx::Beats::fromConstTempo(
+            pTrack->getSampleRate(),
+            mixxx::audio::kStartFramePos,
+            mixxx::Bpm(120),
+            QStringLiteral("vamp_plugin_id=mixxxbpmdetection|rounding=V4"));
+    ASSERT_TRUE(pTrack->trySetBeats(savedGrid));
+
+    const TrackId trackId = internalCollection()->addTrack(pTrack, false);
+    ASSERT_TRUE(trackId.isValid());
+    pTrack.reset();
+    ASSERT_TRUE(GlobalTrackCacheLocker().isEmpty());
+
+    pTrack = internalCollection()->getTrackById(trackId);
+    ASSERT_TRUE(pTrack);
+    ASSERT_TRUE(pTrack->getBeats());
+    EXPECT_EQ(pTrack->getBeats()->getVersion(), savedGrid->getVersion());
+    EXPECT_EQ(pTrack->getBeats()->getSubVersion(), savedGrid->getSubVersion());
+    EXPECT_EQ(pTrack->getBeats()->firstBeat(), savedGrid->firstBeat());
+}
+
+TEST_F(TrackDAOTest, memoryCuePersistsAndDeletes) {
+    const mixxx::FileInfo fileInfo(
+            QDir(QDir::tempPath()), QStringLiteral("memory-cue-persistence.mp3"));
+    TrackPointer pTrack = Track::newTemporary(mixxx::FileAccess(fileInfo));
+    pTrack->setDuration(180);
+    const auto memoryCue = pTrack->createAndAddCue(
+            mixxx::CueType::Memory,
+            Cue::kNoHotCue,
+            mixxx::audio::FramePos(12345),
+            mixxx::audio::kInvalidFramePos);
+    memoryCue->setLabel(QStringLiteral("Breakdown"));
+    const mixxx::RgbColor color(0x123456);
+    memoryCue->setColor(color);
+
+    const TrackId trackId = internalCollection()->addTrack(pTrack, false);
+    ASSERT_TRUE(trackId.isValid());
+    pTrack.reset();
+    ASSERT_TRUE(GlobalTrackCacheLocker().isEmpty());
+
+    pTrack = internalCollection()->getTrackById(trackId);
+    ASSERT_TRUE(pTrack);
+    auto persistedMemoryCues = pTrack->getCuePoints();
+    ASSERT_EQ(persistedMemoryCues.size(), 1);
+    EXPECT_EQ(persistedMemoryCues.front()->getType(), mixxx::CueType::Memory);
+    EXPECT_EQ(persistedMemoryCues.front()->getHotCue(), Cue::kNoHotCue);
+    EXPECT_EQ(persistedMemoryCues.front()->getPosition(), mixxx::audio::FramePos(12345));
+    EXPECT_EQ(persistedMemoryCues.front()->getLabel(), QStringLiteral("Breakdown"));
+    EXPECT_EQ(persistedMemoryCues.front()->getColor(), color);
+
+    pTrack->removeCue(persistedMemoryCues.front());
+    ASSERT_TRUE(internalCollection()->saveTrack(pTrack.get()));
+    pTrack.reset();
+    ASSERT_TRUE(GlobalTrackCacheLocker().isEmpty());
+
+    pTrack = internalCollection()->getTrackById(trackId);
+    ASSERT_TRUE(pTrack);
+    EXPECT_TRUE(pTrack->getCuePoints().isEmpty());
 }
 
 TEST_F(TrackDAOTest, markTrackLocationsAsVerifiedRecoversPresentFilesOnly) {

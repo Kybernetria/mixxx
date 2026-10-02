@@ -25,6 +25,10 @@ void CueMenuPushButton::mousePressEvent(QMouseEvent* e) {
 }
 
 void WCueMenuPopup::updateTypeAndColorIfDefault(mixxx::CueType newType) {
+    // Memory cues have no hotcue index; incomplete conversions are invalid.
+    if (!m_pCue || m_pCue->getType() == mixxx::CueType::Memory) {
+        return;
+    }
     auto hotcueColorPalette =
             m_colorPaletteSettings.getHotcueColorPalette();
     int colorIndex;
@@ -185,8 +189,16 @@ void WCueMenuPopup::setTrackCueGroup(
         return;
     }
 
+    if (m_pTrack) {
+        disconnect(m_pTrack.get(), &Track::cuesUpdated, this, &WCueMenuPopup::slotUpdate);
+    }
     m_pTrack = pTrack;
     m_pCue = pCue;
+    connect(m_pTrack.get(),
+            &Track::cuesUpdated,
+            this,
+            &WCueMenuPopup::slotUpdate,
+            Qt::QueuedConnection);
 
     if (m_pBeatLoopSize.getKey().group != group) {
         m_pBeatLoopSize = PollingControlProxy(group, "beatloop_size");
@@ -207,19 +219,31 @@ void WCueMenuPopup::setTrackCueGroup(
 }
 
 void WCueMenuPopup::slotUpdate() {
+    if (m_pTrack && m_pCue && !m_pTrack->getCuePoints().contains(m_pCue)) {
+        m_pCue.reset();
+        hide();
+    }
     if (m_pTrack && m_pCue) {
+        const bool memory = m_pCue->getType() == mixxx::CueType::Memory;
+        const bool convertible = canConvertCue();
+        m_pStandardCue->setVisible(convertible);
+        m_pSavedLoopCue->setVisible(convertible);
+        m_pSavedJumpCue->setVisible(convertible);
         int hotcueNumber = m_pCue->getHotCue();
         QString hotcueNumberText = "";
         if (hotcueNumber != Cue::kNoHotCue) {
             // Programmers count from 0, but DJs count from 1
             hotcueNumberText = QString(tr("Hotcue #%1")).arg(QString::number(hotcueNumber + 1));
         }
-        m_pCueNumber->setText(hotcueNumberText);
+        m_pCueNumber->setText(memory ? tr("Memory cue") : hotcueNumberText);
 
         QString positionText = "";
         Cue::StartAndEndPositions pos = m_pCue->getStartAndEndPosition();
-        if (pos.startPosition.isValid() && pos.endPosition.isValid() &&
-                m_pCue->getType() != mixxx::CueType::HotCue) {
+        if (!m_pTrack->getSampleRate().isValid()) {
+            positionText = tr("Unknown position");
+        } else if (pos.startPosition.isValid() && pos.endPosition.isValid() &&
+                m_pCue->getType() != mixxx::CueType::HotCue &&
+                m_pCue->getType() != mixxx::CueType::Memory) {
             double startPositionSeconds = pos.startPosition.value() / m_pTrack->getSampleRate();
             double endPositionSeconds = pos.endPosition.value() / m_pTrack->getSampleRate();
             QString startPositionText =
@@ -306,36 +330,64 @@ void WCueMenuPopup::slotUpdate() {
 }
 
 void WCueMenuPopup::slotEditLabel() {
+    if (!m_pTrack || !m_pTrack->getCuePoints().contains(m_pCue))
+        return;
     VERIFY_OR_DEBUG_ASSERT(m_pCue != nullptr) {
         return;
     }
-    m_pCue->setLabel(m_pEditLabel->text());
+    if (m_pCue->getType() == mixxx::CueType::Memory) {
+        m_pTrack->updateMemoryCue(m_pCue, m_pEditLabel->text(), std::nullopt);
+    } else {
+        m_pCue->setLabel(m_pEditLabel->text());
+    }
 }
 
 void WCueMenuPopup::slotChangeCueColor(mixxx::RgbColor::optional_t color) {
+    if (!m_pTrack || !m_pTrack->getCuePoints().contains(m_pCue))
+        return;
     VERIFY_OR_DEBUG_ASSERT(m_pCue != nullptr) {
         return;
     }
     VERIFY_OR_DEBUG_ASSERT(color) {
         return;
     }
-    m_pCue->setColor(*color);
+    if (m_pCue->getType() == mixxx::CueType::Memory) {
+        if (!m_pTrack->updateMemoryCue(m_pCue, std::nullopt, color))
+            return;
+    } else {
+        m_pCue->setColor(*color);
+    }
     m_pColorPicker->setSelectedColor(color);
     hide();
 }
 
 void WCueMenuPopup::slotDeleteCue() {
+    if (!m_pTrack || !m_pTrack->getCuePoints().contains(m_pCue))
+        return;
     VERIFY_OR_DEBUG_ASSERT(m_pCue != nullptr) {
         return;
     }
     VERIFY_OR_DEBUG_ASSERT(m_pTrack != nullptr) {
         return;
     }
-    m_pTrack->removeCue(m_pCue);
+    if (m_pCue->getType() == mixxx::CueType::Memory) {
+        m_pTrack->removeMemoryCue(m_pCue);
+    } else {
+        m_pTrack->removeCue(m_pCue);
+    }
     hide();
 }
 
+bool WCueMenuPopup::canConvertCue() const {
+    return m_pCue && m_pTrack &&
+            m_pTrack->getCuePoints().contains(m_pCue) &&
+            m_pCue->getType() != mixxx::CueType::Memory &&
+            m_pCue->getHotCue() != Cue::kNoHotCue;
+}
+
 void WCueMenuPopup::slotStandardCue() {
+    if (!canConvertCue())
+        return;
     VERIFY_OR_DEBUG_ASSERT(m_pCue != nullptr) {
         return;
     }
@@ -349,6 +401,8 @@ void WCueMenuPopup::slotStandardCue() {
 }
 
 void WCueMenuPopup::slotSavedLoopCueAuto() {
+    if (!canConvertCue())
+        return;
     VERIFY_OR_DEBUG_ASSERT(m_pCue != nullptr) {
         return;
     }
@@ -402,6 +456,8 @@ mixxx::audio::FramePos WCueMenuPopup::getCurrentPlayPositionWithQuantize() const
 }
 
 void WCueMenuPopup::slotSavedLoopCueManual() {
+    if (!canConvertCue())
+        return;
     VERIFY_OR_DEBUG_ASSERT(m_pCue != nullptr) {
         return;
     }
@@ -428,6 +484,8 @@ void WCueMenuPopup::slotSavedLoopCueManual() {
 }
 
 void WCueMenuPopup::slotSavedJumpCueAuto() {
+    if (!canConvertCue())
+        return;
     VERIFY_OR_DEBUG_ASSERT(m_pCue != nullptr) {
         slotUpdate();
         return;
@@ -459,6 +517,8 @@ void WCueMenuPopup::slotSavedJumpCueAuto() {
 }
 
 void WCueMenuPopup::slotSavedJumpCueManual() {
+    if (!canConvertCue())
+        return;
     VERIFY_OR_DEBUG_ASSERT(m_pCue != nullptr) {
         return;
     }

@@ -1,5 +1,13 @@
 # Mixxx
 
+> **AI-generated experimental branch notice:** This is an experimental personal
+> branch continuing official upstream `main` at `414699c`, separate from the
+> combined `0cwa` branch history. It is not an official Mixxx release or upstream
+> project direction. The upstream README content below is retained unchanged. See
+> [experimental branch documentation](docs/experimental-fork.md) and the
+> [development record](docs/signalsmith-memory-cues-development.md).
+> **End of AI-generated notice.**
+
 [![GitHub latest tag](https://img.shields.io/github/tag/mixxxdj/mixxx.svg)](https://mixxx.org/download)
 [![Packaging status](https://repology.org/badge/tiny-repos/mixxx.svg)](https://repology.org/metapackage/mixxx/versions)
 [![Build status](https://github.com/mixxxdj/mixxx/actions/workflows/build.yml/badge.svg)](https://github.com/mixxxdj/mixxx/actions/workflows/build.yml)

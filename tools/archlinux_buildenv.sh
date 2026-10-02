@@ -3,7 +3,7 @@
 set -o pipefail
 
 sudo pacman -S --needed --noconfirm protobuf vamp-plugin-sdk \
-    chromaprint libid3tag rubberband soundtouch \
+    chromaprint libid3tag rubberband \
     lame libogg libmad libvorbis libmp4v2 faad2 opusfile wavpack \
     libshout libsndfile portmidi portaudio \
     sqlite upower lilv libebur128 libmodplug \

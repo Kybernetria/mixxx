@@ -75,6 +75,12 @@ class VisualPlayPosition : public QObject {
     double determinePlayPosInLoopBoundries(
             const VisualPlayPositionData& data, const double& offset);
     double getEnginePlayPos();
+#ifdef BUILD_TESTING
+    double getEnginePlayRateForTest() {
+        VisualPlayPositionData data;
+        return m_data.getAt(0, &data) ? data.m_playRate : 0;
+    }
+#endif
     void getTrackTime(double* pPlayPosition, double* pTempoTrackSeconds);
 
     // WARNING: Not thread safe. This function must only be called from the main
