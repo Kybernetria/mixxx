@@ -77,6 +77,67 @@ class SignalsmithMemoryIntegrationTest : public SignalPathTest {
     void process() {
         m_pEngineMixer->process(kProcessBufferSize);
     }
+    bool startSteadyPlayback() {
+        ControlObject::set(ConfigKey(m_sGroup1, "play"), 1);
+        int settled = 0;
+        for (int i = 0; i < 1000 && settled < 8; ++i) {
+            const auto before = engine()->getExactPlayPos();
+            process();
+            const double expected = kProcessBufferSize / 2.0 * engine()->getRateRatio();
+            settled = std::fabs(engine()->getExactPlayPos() - before - expected) < 1e-6
+                    ? settled + 1
+                    : 0;
+            QTest::qSleep(1);
+        }
+        return settled == 8;
+    }
+    void verifyScratchSlipRestoration(
+            bool waveformScratch, bool reverse, double scratchRate = 0.75) {
+        ASSERT_TRUE(startSteadyPlayback());
+        if (reverse) {
+            ControlObject::set(ConfigKey(m_sGroup1, "reverse"), 1);
+            for (int i = 0; i < 4; ++i) {
+                process();
+            }
+        }
+
+        engine()->setKeylockPreparationPausedForTest(true);
+        if (waveformScratch) {
+            ControlObject::set(ConfigKey(m_sGroup1, "scratch_position_enable"), 1);
+            ControlObject::set(ConfigKey(m_sGroup1, "scratch_position"), 10000);
+        } else {
+            ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 1);
+            ControlObject::set(ConfigKey(m_sGroup1, "scratch2"), 0.0);
+            process();
+            ControlObject::set(ConfigKey(m_sGroup1, "scratch2"), scratchRate);
+        }
+        process();
+        ASSERT_TRUE(engine()->getScratching());
+        const auto anchor = engine()->getExactPlayPos();
+        const double naturalStep = kProcessBufferSize / 2.0 * engine()->getRateRatio() *
+                (reverse ? -1.0 : 1.0);
+        ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+        process();
+        for (int i = 0; i < 4; ++i) {
+            process();
+        }
+
+        ControlObject::set(ConfigKey(m_sGroup1,
+                                   waveformScratch ? "scratch_position_enable" : "scratch2_enable"),
+                0);
+        process();
+        ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+        process();
+
+        // Slip advances on enable, each held-scratch callback, and the scratch
+        // release callback. It was enabled while scratching, so restoring this
+        // position proves the captured rate is independent of foreground motion.
+        EXPECT_NEAR(0.0,
+                engine()->getExactPlayPos() -
+                        (anchor + 6 * naturalStep).toNearestFrameBoundary(),
+                1e-9);
+        engine()->setKeylockPreparationPausedForTest(false);
+    }
 };
 
 TEST_F(SignalsmithMemoryIntegrationTest, PendingPrerollHoldsCueAndOtherDecksContinue) {
@@ -114,6 +175,66 @@ TEST_F(SignalsmithMemoryIntegrationTest, PendingPrerollHoldsCueAndOtherDecksCont
     EXPECT_GT(visual->getEnginePlayRateForTest(), 0);
 }
 
+TEST_F(SignalsmithMemoryIntegrationTest, RepeatQuantizeDoesNotSeekWhilePrerollHoldsTransport) {
+    const auto track = engine()->getLoadedTrack();
+    const auto beats = mixxx::Beats::fromConstTempo(
+            track->getSampleRate(), FramePos(0), mixxx::Bpm(120));
+    ASSERT_TRUE(track->trySetBeats(beats));
+    for (const auto& group : {m_sGroup1, m_sGroup2, m_sGroup3}) {
+        ControlObject::set(ConfigKey(group, "play"), 1);
+    }
+    for (int i = 0; i < 20; ++i) {
+        process();
+        QTest::qSleep(1);
+    }
+    const auto otherStart = m_pChannel2->getEngineBuffer()->getExactPlayPos();
+    engine()->setKeylockPreparationPausedForTest(true);
+    ControlObject::set(ConfigKey(m_sGroup1, "quantize"), 1);
+    for (const int repeat : {0, 1}) {
+        ControlObject::set(ConfigKey(m_sGroup1, "repeat"), repeat);
+        const FramePos anchor(repeat ? 7001 : 5001);
+        engine()->seekExact(anchor);
+        process();
+        ASSERT_EQ(anchor, engine()->getExactPlayPos());
+        for (int i = 0; i < 12; ++i) {
+            process();
+            EXPECT_EQ(anchor, engine()->getExactPlayPos())
+                    << "repeat=" << repeat << " callback=" << i;
+            QTest::qSleep(1);
+        }
+    }
+    EXPECT_GT(m_pChannel2->getEngineBuffer()->getExactPlayPos(), otherStart);
+    engine()->setKeylockPreparationPausedForTest(false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, ScratchEntryDoesNotWaitForPendingPreroll) {
+    for (const bool waveform : {false, true}) {
+        SCOPED_TRACE(waveform ? "mouse" : "controller");
+        ASSERT_TRUE(startSteadyPlayback());
+        engine()->setKeylockPreparationPausedForTest(true);
+        const FramePos anchor(10000);
+        engine()->seekExact(anchor);
+        process();
+        process();
+        ASSERT_EQ(anchor, engine()->getExactPlayPos());
+        if (waveform) {
+            ControlObject::set(ConfigKey(m_sGroup1, "scratch_position"), 0);
+            ControlObject::set(ConfigKey(m_sGroup1, "scratch_position_enable"), 1);
+        } else {
+            ControlObject::set(ConfigKey(m_sGroup1, "scratch2"), 1);
+            ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 1);
+        }
+        process();
+        EXPECT_TRUE(engine()->getScratching());
+        EXPECT_GT(engine()->getExactPlayPos(), anchor);
+        ControlObject::set(ConfigKey(m_sGroup1,
+                                   waveform ? "scratch_position_enable" : "scratch2_enable"),
+                0);
+        engine()->setKeylockPreparationPausedForTest(false);
+        process();
+    }
+}
+
 TEST_F(SignalsmithMemoryIntegrationTest, RealCachingReaderAdvancesFractionalTransport) {
     ControlObject::set(ConfigKey(m_sGroup1, "rate"), 0.25);
     ControlObject::set(ConfigKey(m_sGroup1, "play"), 1);
@@ -148,6 +269,111 @@ TEST_F(SignalsmithMemoryIntegrationTest, RealCachingReaderAdvancesFractionalTran
     for (const auto sample : m_pEngineMixer->getChannelBuffer(m_sGroup1).first(kProcessBufferSize))
         energy += sample * sample;
     EXPECT_GT(energy, 0.01);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, Scratch2SlipUsesNaturalRateIncludingReverseButton) {
+    verifyScratchSlipRestoration(false, true);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, ZeroScratchSlipUsesNaturalRate) {
+    verifyScratchSlipRestoration(false, false, 0.0);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, BackwardScratchSlipUsesForwardNaturalRate) {
+    verifyScratchSlipRestoration(false, false, -0.75);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, WaveformMouseScratchSlipUsesNaturalRate) {
+    verifyScratchSlipRestoration(true, false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, SlipKeepsCapturedRateAfterTempoChange) {
+    ASSERT_TRUE(startSteadyPlayback());
+    const auto anchor = engine()->getExactPlayPos();
+    const double step = kProcessBufferSize / 2.0 * engine()->getRateRatio();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+    process();
+    engine()->setKeylockPreparationPausedForTest(true);
+    engine()->seekExact(FramePos(100000));
+    process();
+    ControlObject::set(ConfigKey(m_sGroup1, "rate"), 0.25);
+    process();
+    process();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+    process();
+    EXPECT_NEAR(0.0,
+            engine()->getExactPlayPos() -
+                    (anchor + 4 * step).toNearestFrameBoundary(),
+            1e-9);
+    engine()->setKeylockPreparationPausedForTest(false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, PausedTransportDoesNotAdvanceSlipPosition) {
+    ASSERT_TRUE(startSteadyPlayback());
+    ControlObject::set(ConfigKey(m_sGroup1, "play"), 0);
+    process();
+    const auto anchor = engine()->getExactPlayPos();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+    for (int i = 0; i < 4; ++i) {
+        process();
+    }
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+    process();
+    EXPECT_EQ(anchor, engine()->getExactPlayPos());
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, FractionalRateSlipToggleDoesNotRestartPreparation) {
+    ControlObject::set(ConfigKey(m_sGroup1, "rate"), 0.25);
+    ASSERT_TRUE(startSteadyPlayback());
+
+    const auto beforeEnable = engine()->getExactPlayPos();
+    const double enableStep = kProcessBufferSize / 2.0 * engine()->getRateRatio();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+    process();
+    EXPECT_NEAR(enableStep, engine()->getExactPlayPos() - beforeEnable, 1e-6);
+    engine()->setKeylockPreparationPausedForTest(true);
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+    const auto beforeToggle = engine()->getExactPlayPos();
+    const double expected = kProcessBufferSize / 2.0 * engine()->getRateRatio();
+    process();
+    EXPECT_NEAR(expected,
+            engine()->getExactPlayPos() - beforeToggle,
+            1e-6);
+    engine()->setKeylockPreparationPausedForTest(false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, SlipRestoresCounterfactualPositionAfterRealSeek) {
+    ASSERT_TRUE(startSteadyPlayback());
+    const auto start = engine()->getExactPlayPos();
+    const double step = kProcessBufferSize / 2.0 * engine()->getRateRatio();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+    process();
+    engine()->setKeylockPreparationPausedForTest(true);
+    engine()->seekExact(FramePos(100000));
+    process();
+    process();
+    EXPECT_EQ(FramePos(100000), engine()->getExactPlayPos());
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+    process();
+    EXPECT_EQ((start + 3 * step).toNearestFrameBoundary(), engine()->getExactPlayPos());
+    EXPECT_EQ(1, ControlObject::get(ConfigKey(m_sGroup1, "play")));
+    engine()->setKeylockPreparationPausedForTest(false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, SlipQuitAndAdoptPreservesRelocatedPosition) {
+    ASSERT_TRUE(startSteadyPlayback());
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+    process();
+    engine()->setKeylockPreparationPausedForTest(true);
+    engine()->seekExact(FramePos(100000));
+    process();
+    process();
+    engine()->slipQuitAndAdopt();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+    process();
+    EXPECT_EQ(FramePos(100000), engine()->getExactPlayPos());
+    EXPECT_EQ(1, ControlObject::get(ConfigKey(m_sGroup1, "play")));
+    engine()->setKeylockPreparationPausedForTest(false);
 }
 
 TEST_F(SignalsmithMemoryIntegrationTest, KeylockOffKeepsNaturalRateLinearAndKeyAdjustIndependent) {

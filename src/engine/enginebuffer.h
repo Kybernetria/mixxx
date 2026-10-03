@@ -367,6 +367,8 @@ class EngineBuffer : public EngineObject {
 
     // Copy of rate_exchange, used to check if rate needs to be updated
     double m_rate_old;
+    // Previous callback's natural source-frame/output-frame rate for slip.
+    double m_naturalRateOld;
 
     // Copy of length of file
     mixxx::audio::FramePos m_trackEndPositionOld;

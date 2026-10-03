@@ -113,6 +113,24 @@ TEST_F(EngineBufferScaleSignalsmithTest, HeldWorkerDoesNotReadOrAllocateOnCallba
     EXPECT_GT(reader.position, 20000);
 }
 
+TEST_F(EngineBufferScaleSignalsmithTest, CrossfadeDoesNotSubmitHeldPreroll) {
+    ready();
+    scaler.setPreparationPausedForTest(true);
+    std::array<float, 512> output{};
+    ASSERT_EQ(0, scaler.scaleBuffer(output.data(), output.size()));
+    const auto calls = reader.calls;
+    reader.position = 20000;
+    reader.totalRead = 0;
+    for (int i = 0; i < 32; ++i) {
+        std::fill(output.begin(), output.end(), 1.0f);
+        EXPECT_EQ(0, scaler.scaleBufferForCrossfade(output.data(), output.size()));
+        EXPECT_TRUE(std::all_of(output.begin(), output.end(), [](float x) { return x == 0; }));
+    }
+    EXPECT_EQ(calls, reader.calls);
+    EXPECT_EQ(0, reader.totalRead);
+    scaler.setPreparationPausedForTest(false);
+}
+
 TEST_F(EngineBufferScaleSignalsmithTest, HeldWorkerFormatCancellationAndShutdown) {
     ready();
     scaler.setPreparationPausedForTest(true);

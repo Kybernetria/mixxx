@@ -22,45 +22,15 @@ using namespace rendergraph;
 
 namespace {
 
-// The texture will contain 12 characters: 10 digits, colon and dot
-constexpr int NUM_CHARS = 12;
-
 // space around chars for blurred dark outline
 constexpr int OUTLINE_SIZE = 4;
 // alpha of the blurred dark outline
 constexpr int OUTLINE_ALPHA = 224;
 
-constexpr char indexToChar(int index) {
-    constexpr char str[] = "0123456789:.";
-    return str[index];
-}
-constexpr int charToIndex(QChar ch) {
-    int value = ch.toLatin1() - '0';
-    if (value >= 0 && value <= 9) {
-        return value;
-    }
-    if (ch == ':') {
-        return 10;
-    }
-    if (ch == '.') {
-        return 11;
-    }
-    DEBUG_ASSERT(false);
-    return 11; // fallback to dot
-}
-constexpr bool checkCharToIndex() {
-    for (int i = 0; i < NUM_CHARS; i++) {
-        if (charToIndex(indexToChar(i)) != i) {
-            return false;
-        }
-    }
-    return true;
-}
-static_assert(checkCharToIndex());
-
 } // namespace
 
 allshader::DigitsRenderNode::DigitsRenderNode() {
+    static_assert(checkCharacterMapping());
     setGeometry(std::make_unique<Geometry>(TextureMaterial::attributes(), 0));
     setMaterial(std::make_unique<TextureMaterial>());
     geometry().setDrawingMode(Geometry::DrawingMode::Triangles);
@@ -92,6 +62,7 @@ void allshader::DigitsRenderNode::updateTexture(rendergraph::Context* pContext,
     QFontMetricsF metrics{font};
     font.setFamily("Open Sans");
     float maxTextHeight;
+    qreal minTop;
     bool retry = false;
     do {
         // At small sizes, we need to limit the pen width, to avoid drawing artifacts.
@@ -107,13 +78,21 @@ void allshader::DigitsRenderNode::updateTexture(rendergraph::Context* pContext,
 
         metrics = QFontMetricsF{font};
 
-        maxTextHeight = 0;
+        minTop = 0.0;
+        qreal maxBottom = 0.0;
+        bool hasGlyphBounds = false;
 
-        for (int i = 0; i < NUM_CHARS; i++) {
+        for (std::size_t i = 0; i < kCharacterCount; i++) {
             const QString text(indexToChar(i));
             const auto rect = metrics.tightBoundingRect(text);
-            maxTextHeight = std::max(maxTextHeight, static_cast<float>(rect.height()));
+            if (rect.isEmpty()) {
+                continue;
+            }
+            minTop = hasGlyphBounds ? std::min(minTop, rect.top()) : rect.top();
+            maxBottom = hasGlyphBounds ? std::max(maxBottom, rect.bottom()) : rect.bottom();
+            hasGlyphBounds = true;
         }
+        maxTextHeight = hasGlyphBounds ? static_cast<float>(maxBottom - minTop) : 0.0f;
         if (!retry && maxTextHeight > maxHeightWithoutSpace) {
             // We need to adjust the font size to fit in the maxHeight.
             // Only do this once.
@@ -128,14 +107,14 @@ void allshader::DigitsRenderNode::updateTexture(rendergraph::Context* pContext,
 
     m_height = static_cast<float>(std::ceil(maxTextHeight)) + space * 2.f + 1.f;
 
-    const float y = maxTextHeight + space - 0.5f;
+    const float y = static_cast<float>(space - minTop - 0.5);
 
     auto roundToPixel = createFunctionRoundToPixel(devicePixelRatio);
 
     float totalTextWidth{};
-    std::array<float, NUM_CHARS> xs;
+    std::array<float, kCharacterCount> xs;
     // determine x position and with of each of the chars in the texture image.
-    for (int i = 0; i < NUM_CHARS; i++) {
+    for (std::size_t i = 0; i < kCharacterCount; i++) {
         xs[i] = totalTextWidth;
         float w = roundToPixel(static_cast<float>(
                           metrics.horizontalAdvance(indexToChar(i)))) +
@@ -143,11 +122,11 @@ void allshader::DigitsRenderNode::updateTexture(rendergraph::Context* pContext,
         totalTextWidth += w;
         m_width[i] = static_cast<float>(w);
     }
-    for (int i = 0; i < NUM_CHARS; i++) {
+    for (std::size_t i = 0; i < kCharacterCount; i++) {
         // position of character at index i in the texture, normalized
         m_offset[i] = static_cast<float>(xs[i] / totalTextWidth);
     }
-    m_offset[NUM_CHARS] = 1.f;
+    m_offset[kCharacterCount] = 1.f;
 
     QImage image(std::lround(totalTextWidth * devicePixelRatio),
             std::lround(m_height * devicePixelRatio),
@@ -166,7 +145,7 @@ void allshader::DigitsRenderNode::updateTexture(rendergraph::Context* pContext,
         painter.setPen(pen);
         painter.setFont(font);
         QPainterPath path;
-        for (int i = 0; i < NUM_CHARS; i++) {
+        for (std::size_t i = 0; i < kCharacterCount; i++) {
             const QString text(indexToChar(i));
             path.addText(QPointF(xs[i] + space + 0.5, y), font, text);
         }
@@ -198,7 +177,7 @@ void allshader::DigitsRenderNode::updateTexture(rendergraph::Context* pContext,
         painter.setBrush(Qt::white);
 
         QPainterPath path;
-        for (int i = 0; i < NUM_CHARS; i++) {
+        for (std::size_t i = 0; i < kCharacterCount; i++) {
             const QString text(indexToChar(i));
             path.addText(QPointF(xs[i] + space + 0.5, y), font, text);
         }
@@ -260,7 +239,8 @@ float allshader::DigitsRenderNode::addVertices(TexturedVertexUpdater& vertexUpda
         if (x != x0) {
             x -= space;
         }
-        int index = charToIndex(c);
+        DEBUG_ASSERT(kCharacters.find(c.toLatin1()) != std::string_view::npos);
+        const auto index = charToIndex(c.toLatin1());
 
         vertexUpdater.addRectangle({x, y},
                 {x + m_width[index], y + height()},

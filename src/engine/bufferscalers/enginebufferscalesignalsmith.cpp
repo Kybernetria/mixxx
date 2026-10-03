@@ -264,6 +264,19 @@ void EngineBufferScaleSignalsmith::clear() {
     state.resuming = false;
 }
 
+double EngineBufferScaleSignalsmith::scaleBufferForCrossfade(CSAMPLE* output, SINT samples) {
+    if (!output || samples <= 0) {
+        return 0;
+    }
+    SampleUtil::clear(output, samples);
+    auto& state = *m_state;
+    if (!state.acceptAndAdoptForCallback() || state.needsPreroll || state.seekOutstanding ||
+            !state.active || state.active->key != state.requested.load(std::memory_order_acquire)) {
+        return 0;
+    }
+    return scaleBuffer(output, samples);
+}
+
 double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) {
     if (!output || samples <= 0)
         return 0;

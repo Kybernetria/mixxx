@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <new>
 
@@ -60,10 +62,14 @@ void* operator new(std::size_t size, std::align_val_t alignment) {
     if (mixxxtest::countCallbackAllocations)
         ++mixxxtest::callbackAllocations;
     void* pointer = nullptr;
+    // Explicit aligned-new callers (e.g. LLVM) may request alignments smaller
+    // than a pointer. posix_memalign additionally requires pointer alignment.
+    const auto allocationAlignment = std::max(sizeof(void*),
+            static_cast<std::size_t>(alignment));
 #ifdef _WIN32
-    pointer = _aligned_malloc(size ? size : 1, static_cast<std::size_t>(alignment));
+    pointer = _aligned_malloc(size ? size : 1, allocationAlignment);
 #else
-    if (posix_memalign(&pointer, static_cast<std::size_t>(alignment), size ? size : 1) != 0)
+    if (posix_memalign(&pointer, allocationAlignment, size ? size : 1) != 0)
         pointer = nullptr;
 #endif
     if (pointer)
@@ -108,6 +114,16 @@ void operator delete(void* pointer, std::align_val_t alignment, const std::nothr
 }
 void operator delete[](void* pointer, std::align_val_t alignment, const std::nothrow_t&) noexcept {
     ::operator delete(pointer, alignment);
+}
+
+TEST(CallbackAllocationCheckTest, SmallExplicitAlignments) {
+    for (const auto value : {1u, 2u, 4u, 8u}) {
+        const auto alignment = static_cast<std::align_val_t>(value);
+        void* pointer = ::operator new(512, alignment, std::nothrow);
+        ASSERT_NE(nullptr, pointer);
+        EXPECT_EQ(0u, reinterpret_cast<std::uintptr_t>(pointer) % value);
+        ::operator delete(pointer, alignment, std::nothrow);
+    }
 }
 
 TEST(CallbackAllocationCheckTest, MatchingNothrowAndAlignedFamilies) {

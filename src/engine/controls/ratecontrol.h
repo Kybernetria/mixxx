@@ -51,6 +51,10 @@ public:
           std::size_t samplesPerBuffer,
           bool* pReportScratching,
           bool* pReportReverse);
+  // Callback-owned rate without foreground scratch/jog motion, cached by calculateSpeed.
+  double naturalPlaybackSpeed() const {
+      return m_naturalPlaybackSpeed;
+  }
 
   // Set rate change when temp rate button is pressed
   static void setTemporaryRateChangeCoarseAmount(double v);
@@ -92,6 +96,8 @@ public slots:
   void slotControlFastBack(double);
 
 private:
+  friend class ReadAheadManagerTest;
+
   void processTempRate(const size_t bufferSamples);
   double getJogFactor() const;
   double getWheelFactor() const;
@@ -174,4 +180,5 @@ private:
   double m_tempRateRatio;
   // Speed for temporary rate change
   double m_dRateTempRampChange;
+  double m_naturalPlaybackSpeed = 0.0;
 };

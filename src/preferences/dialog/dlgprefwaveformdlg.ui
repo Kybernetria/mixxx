@@ -481,8 +481,11 @@ Select from different types of displays for the waveform, which differ primarily
      </item>
      <item row="11" column="1" colspan="2">
       <widget class="QCheckBox" name="untilMarkShowBeatsCheckBox">
+       <property name="toolTip">
+        <string>Show beats as bars and beats (period-separated) until the next marker, including memory cues.</string>
+       </property>
        <property name="text">
-        <string>Beats until next marker</string>
+        <string>Bars/beats until next marker (4 beats/bar)</string>
        </property>
       </widget>
      </item>

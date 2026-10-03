@@ -18,6 +18,9 @@ class EngineBufferScaleSignalsmith final : public EngineBufferScale {
     void setScaleParameters(double baseRate, double* tempo, double* pitch) override;
     void clear() override;
     double scaleBuffer(CSAMPLE* output, SINT samples) override;
+    // Crossfade capture may use existing output, but must never initiate a
+    // reader preroll that the newly selected scaler will immediately invalidate.
+    double scaleBufferForCrossfade(CSAMPLE* output, SINT samples);
 
 #ifdef BUILD_TESTING
     // Holds only the worker, never the callback; for deterministic handoff tests.

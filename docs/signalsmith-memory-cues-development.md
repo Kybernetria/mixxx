@@ -11,8 +11,11 @@
 > checkpoints are recorded below; no unreported passes are claimed. **End of
 > AI-generated current-scope notice.**
 
-The user has authorized commits and an ordinary push to the dedicated personal
-branch after local validation and review. Upstream submissions and releases are
+The user has authorized commits and ordinary pushes to the dedicated personal
+branch after local validation and review. Commit and push each subsequent focused
+logical change, recording its verification and known limits, so earlier states
+remain available for rollback. Preserve published history; use a revert when a
+rollback is requested, not a force-push. Upstream submissions and releases are
 not authorized.
 
 ## Human listening checklist
@@ -23,6 +26,161 @@ scratch; exercise loops, reverse playback and cue jumps; verify memory-cue
 persistence and beatgrid preservation; change sample rate and restart, then
 repeat the checks. Listen for glitches, timing shifts, stale cues and unexpected
 state changes. This is a human DJ check, not a substitute for local validation.
+
+## Live-regression investigation (2026-10-02)
+
+Live testing of the Release application reported slip stutter on both enable
+and disable, scratch-entry jitter with both a controller and mouse drag,
+synced beatjumps that recover alignment gradually, apparent random
+stops, and a waveform-renderer crash. **This build is not ready for live use.**
+Earlier software passes did not cover these interactions adequately.
+
+The crashed executable and core were preserved locally before rebuilding;
+neither belongs in Git or public artifacts. The core faults in the marker-node
+return path of `allshader_gl::WaveformRenderMark::update()`. A rendered node
+retains a raw owner after a dynamic memory-cue mark is removed. Replacing the
+hover list (as another waveform renderer can do) removes an additional strong
+reference. A focused OpenGL test reproduces the heap-use-after-free under
+ASan using the pre-fix renderer. Nodes now retain a weak owner and discard
+expired-owner nodes while the render context is current, avoiding an ownership
+cycle. The same test passes with the fix.
+
+A separate integration test reproduces a redundant slip-restoration seek:
+uninterrupted fractional transport is rounded on slip exit, causing a scaler
+reset and new preparation. Slip exit now compares frame-rounded positions
+before requesting restoration. Explicit cue seeks are unchanged. Regressions
+also cover a genuine slipped relocation and quit-and-adopt.
+
+The OpenGL test initially exposed a test-only allocator defect: LLVM requests
+an explicit four-byte alignment, but `posix_memalign` requires at least pointer
+alignment. The replacement allocator now supplies the stronger alignment;
+small-alignment tests retain matching allocation/deallocation families.
+
+Focused verification: 23 tests passed with ASan/UBSan and leak detection, using
+changed implementation and test objects linked ahead of the existing sanitized
+libraries. This is an explicitly bounded overlay, **not a completed full-tree
+sanitizer rebuild**. The before/after overlay drivers and private logs remain in
+`build-debug/live-regressions-1222284/`, outside Git.
+
+Scratch-entry jitter and random stops remain unresolved. The synchronized
+beatjump preparation hold can lose time against the advancing leader; a safe
+live-timeline recovery policy is not implemented. Exact cue anchoring must not
+be changed into wall-clock catch-up as a blanket workaround. The slip fix does
+not establish that the reported one-second stutter, particularly on enable, is
+fully resolved. Hardware retesting is still required.
+
+## Async transport repairs and validation (2026-10-03)
+
+These accumulated repairs form an **experimental rollback checkpoint**, prepared
+for the user's requested commit and ordinary push to the dedicated personal
+branch. Passing the recorded software checks does not make this a live-ready
+state; the unresolved defects below remain part of the checkpoint. The installed
+Mixxx and reference worktree are unchanged. Signalsmith's vendor code and 120/30 ms
+preset are unchanged; standalone PitchShift remains out of scope.
+
+- Repeat plus quantize requests phase synchronization only after delivered
+  progress. Held preparation no longer looks like a forward repeat wrap.
+- ReadAhead publishes wrap notifications when positive delivered consumption
+  crosses a logged discontinuity, not when speculative input is gathered.
+  Zero-length boundary entries retain their notification until consumption.
+- A secondary crossfade cache miss rolls back cursor, read log and cache state.
+  A matching retry reuses its decisions; provider revision changes invalidate
+  obsolete plans. A revision change across trigger queries rejects the attempt
+  before reader I/O, rather than tagging an old decision with a newer revision.
+  Loop-query history commits only after successful reads. One-shot commits consume
+  frozen selected-cue decisions once and validate raw scalars without repeating
+  quantization or entering Track/Cue models; a concurrent-write limit remains below.
+- Invalid track-end metadata no longer overflows reverse-crossfade spans.
+- Accepted seeks and scaler switches always re-anchor the reader, even when
+  crossfade capture is skipped. Crossfade-only Signalsmith reads initialize
+  silence without submitting preparation while the configuration is pending.
+- Slip captures the previous callback's natural source/output rate, rather than
+  zero or backward scratch velocity. Its background rate remains frozen while
+  foreground tempo changes; paused slip stays paused. Vinyl behavior is retained.
+  Real controller and mouse scratch entry does not wait for held preparation.
+
+Five selected regressions failed at their intended assertions in a private
+matched semantic-reversion binary: three natural-slip cases, loop-query history,
+and one-shot cue retry. This is not an original upstream whole-build baseline.
+Two additional matched semantic-reversion cases fail with the old one-shot
+commit: it can disarm another matching cue after an edit, or disarm a later
+reactivation by repeating the commit. Another reversion fails because it retains
+an obsolete trigger across a query-time revision change. These are not upstream
+runtime A/B tests. Reviewers inspected source without running tests; the final
+functional review requests changes for the narrower interleaving below.
+
+Current verification, with isolated profiles inside `mixxxbox`:
+
+- Full Release CTest: **1,425 successful**, 482.50 seconds.
+- Full Debug CTest: **1,425 successful**, 483.47 seconds.
+- The normal-suite opt-in workload remains skipped; 38 inherited tests remain
+  disabled. An initial Debug run exposed missing fixture control owners and a
+  duplicate reference owner. The fixtures were corrected, not assertions disabled.
+- The current sanitizer test executable completed its incremental CMake/Ninja
+  rebuild, including changed libraries and dependent objects. **220 selected
+  ASan/UBSan tests passed**, 397.08 seconds, with leak detection and exit status 0.
+  This supersedes the incomplete rebuild for this checkpoint; it is not an
+  all-tests sanitizer run or the earlier object overlay.
+- Changed-file hooks and whitespace checks passed.
+
+A narrower deadline-paced matrix ran **24 runs / 24,000 callbacks**: three decks,
+1.25 tempo, 44.1 kHz stereo, Debug/Release, effects off/on, deck 1 seeking every
+50 callbacks, two repetitions. It recorded zero overruns, no unaffected-deck
+stalls/silence, and no canceled or unfinished seeks. Seeking-deck preparation
+holds remain intentional. This does not replace the earlier broader matrix or
+its unexplained smallest-buffer overrun.
+
+| Interleaved samples | p99 range | Maximum callback | Maximum seek-output proxy |
+| --- | --- | --- | --- |
+| 128 | 576.03–778.78 µs | 1,066.97 µs | 7.00 ms |
+| 512 | 1,082.93–1,271.89 µs | 1,569.18 µs | 7.30 ms |
+| 1,024 | 2,143.64–2,380.40 µs | 3,032.52 µs | 14.07 ms |
+
+### Remaining scratch-release and sync boundary
+
+A private real-mixer probe now demonstrates a redundant preparation boundary
+for a quantized synchronized follower. Scratch release submits generation 4 in
+callback 0; its post-process scratch notification queues phase synchronization.
+Callback 1 accepts a different phase anchor and clears that preparation. Once
+the deliberately held worker is released, generation 5 must be prepared before
+sustained delivery resumes. The unsynced control does not make this phase seek.
+Both cases recover and the other deck continues. This held-worker trace does not
+measure an audible gap or prove the reported one-second stutter's cause.
+
+A private one-callback deferral avoids the obsolete submission in that fixture,
+but review identified an avoidable delay when missing grids or a no-op phase
+target would not invalidate preparation. **That candidate was not applied to
+production.** A safe fix must distinguish actual phase relocation from a no-op,
+without speculative callback model work or changing exact cue semantics.
+
+A final functional audit identified a remaining non-atomic one-shot disarm:
+GUI/controller reactivation or coordinate edits can interleave after validation
+and before `setStatus(Set)`. A private post-validation interleave probe demonstrates
+three failing schedules: reactivation, coordinate edit, and edit away/back. It
+injects the scheduling point only in ignored copied source, not production.
+Generation checks followed by an unconditional write do not close this race;
+a status-only CAS would not address coordinate edits or ABA. A correct solution
+needs coordinated producer publication and conditional status projection, not
+callback locks or another revision check. The security review approved only its
+memory/bounds scope and explicitly did not establish transactional edit safety.
+Existing trigger-query quantization also retains the inherited `Track::getBeats()`
+model-lock dependency; the new commit avoids it but callbacks are not globally
+proven model-free or lock-free.
+
+Scratch-release continuity, live synchronized-jump/slip-restoration timeline
+recovery, concurrent saved-jump disarm, and random-stop causes remain open. Existing sync feedback can correct
+eligible modular beat-phase error; it is not proof of whole-beat source-timeline
+recovery. No blanket elapsed-time catch-up, zero-BPM substitution, speculative
+DSP padding or alternate keylock backend was added. **The branch remains not
+ready for live use; hardware/listening retesting is still required.**
+
+Private logs, baseline/probe drivers, hashes and timing CSV remain under
+`build-debug/live-regressions-1222284/current-validation/`, outside Git. Relevant
+logs are `{debug,release}-transport-final-full.log`,
+`sanitizers-transport-final-tests.log`, `reversion-tests-2.log`,
+`old-cue-commit-tests.log`, `old-query-revision-tests.log`, `timings-final/*.log`,
+`cue-commit-interleave-tests.log`, and
+`scratch-sync-probe/{tests.log,deferred/tests.log}`.
 
 ## Starting point and baseline
 

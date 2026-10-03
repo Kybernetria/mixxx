@@ -6,13 +6,20 @@
 #include <QtDebug>
 
 #include "control/controlobject.h"
+#include "control/controlpotmeter.h"
+#include "control/controlpushbutton.h"
+#include "control/controlttrotary.h"
 #include "engine/cachingreader/cachingreader.h"
 #include "engine/cachingreader/cachingreaderchunk.h"
 #include "engine/controls/cuecontrol.h"
 #include "engine/controls/loopingcontrol.h"
+#include "engine/controls/ratecontrol.h"
+#include "engine/positionscratchcontroller.h"
+#include "test/callbackallocationcheck.h"
 #include "test/mixxxtest.h"
 #include "util/assert.h"
 #include "util/defs.h"
+#include "util/rotary.h"
 #include "util/sample.h"
 
 namespace {
@@ -33,16 +40,31 @@ class StubReader : public CachingReader {
         Q_UNUSED(startSample);
         Q_UNUSED(reverse);
         Q_UNUSED(channelCount);
-        SampleUtil::clear(buffer, numSamples);
-        return miss ? CachingReader::ReadResult::UNAVAILABLE : CachingReader::ReadResult::AVAILABLE;
+        ++readCount;
+        if (miss || readCount == failOnRead) {
+            return CachingReader::ReadResult::UNAVAILABLE;
+        }
+        for (SINT i = 0; i < numSamples; ++i) {
+            buffer[i] = static_cast<CSAMPLE>(startSample + i);
+        }
+        return CachingReader::ReadResult::AVAILABLE;
     }
     bool miss = false;
+    int readCount = 0;
+    int failOnRead = -1;
 };
 
 class StubLoopControl : public LoopingControl {
   public:
     StubLoopControl()
             : LoopingControl(kGroup, UserSettingsPointer()) {
+    }
+
+    std::uint64_t triggerRevision() const override {
+        return useRealControl ? LoopingControl::triggerRevision() : m_triggerRevision;
+    }
+    void bumpTriggerRevision() {
+        ++m_triggerRevision;
     }
 
     void pushValues(double trigger, double target) {
@@ -54,7 +76,13 @@ class StubLoopControl : public LoopingControl {
 
     mixxx::audio::FramePos nextTrigger(bool reverse,
             mixxx::audio::FramePos currentPosition,
-            mixxx::audio::FramePos* pTargetPosition) override {
+            mixxx::audio::FramePos* pTargetPosition,
+            ReadTriggerState* nextState = nullptr) override {
+        ++queryCount;
+        if (useRealControl) {
+            return LoopingControl::nextTrigger(
+                    reverse, currentPosition, pTargetPosition, nextState);
+        }
         Q_UNUSED(reverse);
         Q_UNUSED(currentPosition);
         Q_UNUSED(pTargetPosition);
@@ -67,12 +95,24 @@ class StubLoopControl : public LoopingControl {
   protected:
     QList<mixxx::audio::FramePos> m_triggerReturnValues;
     QList<mixxx::audio::FramePos> m_targetReturnValues;
+
+  public:
+    int queryCount{0};
+    std::uint64_t m_triggerRevision{0};
+    bool useRealControl{false};
 };
 
 class StubCueControl : public CueControl {
   public:
     StubCueControl()
             : CueControl(kGroup, UserSettingsPointer()) {
+    }
+
+    std::uint64_t triggerRevision() const override {
+        return useRealControl ? CueControl::triggerRevision() : m_triggerRevision;
+    }
+    void bumpTriggerRevision() {
+        ++m_triggerRevision;
     }
 
     void pushValues(double trigger, double target) {
@@ -83,10 +123,23 @@ class StubCueControl : public CueControl {
                 mixxx::audio::FramePos::fromEngineSamplePosMaybeInvalid(target));
     }
 
-    mixxx::audio::FramePos nextTrigger(bool,
-            mixxx::audio::FramePos,
+    mixxx::audio::FramePos nextTrigger(bool reverse,
+            mixxx::audio::FramePos currentPosition,
             mixxx::audio::FramePos* pTargetPosition,
-            mixxx::audio::FrameDiff_t) override {
+            mixxx::audio::FrameDiff_t lookAheadFrames,
+            bool commitState) override {
+        ++queryCount;
+        if (useRealControl) {
+            return CueControl::nextTrigger(reverse,
+                    currentPosition,
+                    pTargetPosition,
+                    lookAheadFrames,
+                    commitState);
+        }
+        if (bumpRevisionOnQuery) {
+            bumpTriggerRevision();
+            bumpRevisionOnQuery = false;
+        }
         RELEASE_ASSERT(!m_targetReturnValues.isEmpty());
         *pTargetPosition = m_targetReturnValues.takeFirst();
         RELEASE_ASSERT(!m_triggerReturnValues.isEmpty());
@@ -96,6 +149,12 @@ class StubCueControl : public CueControl {
   protected:
     QList<mixxx::audio::FramePos> m_triggerReturnValues;
     QList<mixxx::audio::FramePos> m_targetReturnValues;
+
+  public:
+    int queryCount{0};
+    std::uint64_t m_triggerRevision{0};
+    bool bumpRevisionOnQuery{false};
+    bool useRealControl{false};
 };
 
 class ReadAheadManagerTest : public MixxxTest {
@@ -115,6 +174,8 @@ class ReadAheadManagerTest : public MixxxTest {
               m_repeatCO(ConfigKey(kGroup, "repeat")),
               m_slipEnabledCO(ConfigKey(kGroup, "slip_enabled")),
               m_trackSamplesCO(ConfigKey(kGroup, "track_samples")),
+              m_mainSampleRateCO(ConfigKey("[App]", "samplerate"), true, false, false, 44100),
+              m_syncModeCO(ConfigKey(kGroup, "sync_mode")),
               m_pBuffer(SampleUtil::alloc(MAX_BUFFER_LEN)) {
     }
     ~ReadAheadManagerTest() override {
@@ -126,6 +187,9 @@ class ReadAheadManagerTest : public MixxxTest {
         SampleUtil::clear(m_pBuffer, MAX_BUFFER_LEN);
         m_pReader.reset(new StubReader());
         m_pLoopControl.reset(new StubLoopControl());
+        m_pLoopControl->setFrameInfo(mixxx::audio::FramePos(0),
+                mixxx::audio::FramePos(100000),
+                mixxx::audio::SampleRate(44100));
         m_pCueControl.reset(new StubCueControl());
         m_pReadAheadManager.reset(new ReadAheadManager(m_pReader.data(),
                 m_pLoopControl.data(),
@@ -146,11 +210,14 @@ class ReadAheadManagerTest : public MixxxTest {
     ControlObject m_repeatCO;
     ControlObject m_slipEnabledCO;
     ControlObject m_trackSamplesCO;
+    ControlObject m_mainSampleRateCO;
+    ControlObject m_syncModeCO;
     CSAMPLE* m_pBuffer;
     QScopedPointer<StubReader> m_pReader;
     QScopedPointer<StubLoopControl> m_pLoopControl;
     QScopedPointer<StubCueControl> m_pCueControl;
     QScopedPointer<ReadAheadManager> m_pReadAheadManager;
+    RateControl m_rateControl{kGroup, UserSettingsPointer()};
 
     void fillReadLogWithZeroLengthEntries() {
         for (std::size_t i = 0; i < ReadAheadManager::kReadLogCapacity; ++i) {
@@ -164,7 +231,68 @@ class ReadAheadManagerTest : public MixxxTest {
     std::size_t readLogCapacity() const {
         return ReadAheadManager::kReadLogCapacity;
     }
+    int rateControlWrapAroundCount() const {
+        return m_rateControl.m_wrapAroundCount;
+    }
+    mixxx::audio::FramePos rateControlJumpPosition() const {
+        return m_rateControl.m_jumpPos;
+    }
+    mixxx::audio::FramePos rateControlTargetPosition() const {
+        return m_rateControl.m_targetPos;
+    }
+    void setChangedLoop(mixxx::audio::FramePos start,
+            mixxx::audio::FramePos end,
+            LoopingControl::LoopSeekMode mode) {
+        m_pLoopControl->setLoopInfo({start, end, mode});
+    }
+    HotcueControl* hotcue(int index) {
+        return m_pCueControl->m_hotcueControls[index];
+    }
+    bool firstReadLogEntryHasWrap() const {
+        return m_pReadAheadManager
+                ->m_readAheadLog[m_pReadAheadManager->m_readLogStart]
+                .hasWrapAround;
+    }
 };
+
+TEST_F(ReadAheadManagerTest, RealLoopControlsInvalidateTriggerRevision) {
+    auto revision = m_pLoopControl->LoopingControl::triggerRevision();
+    m_pLoopControl->slotLoopStartPos(8);
+    EXPECT_GT(m_pLoopControl->LoopingControl::triggerRevision(), revision);
+    revision = m_pLoopControl->LoopingControl::triggerRevision();
+    ControlObject::set(ConfigKey(kGroup, "slip_enabled"), 1);
+    ControlObject::set(ConfigKey(kGroup, "repeat"), 1);
+    EXPECT_GT(m_pLoopControl->LoopingControl::triggerRevision(), revision);
+    revision = m_pLoopControl->LoopingControl::triggerRevision();
+    ControlObject::set(ConfigKey(kGroup, "repeat"), 0);
+    EXPECT_GT(m_pLoopControl->LoopingControl::triggerRevision(), revision);
+}
+
+TEST_F(ReadAheadManagerTest, RealHotcueControlsInvalidateTriggerRevision) {
+    auto revision = m_pCueControl->CueControl::triggerRevision();
+    ControlObject::set(ConfigKey(kGroup, "hotcue_1_position"), 8);
+    EXPECT_GT(m_pCueControl->CueControl::triggerRevision(), revision);
+    revision = m_pCueControl->CueControl::triggerRevision();
+    ControlObject::set(ConfigKey(kGroup, "hotcue_1_endposition"), 4);
+    EXPECT_GT(m_pCueControl->CueControl::triggerRevision(), revision);
+}
+
+TEST_F(ReadAheadManagerTest, OwnerHotcueStatusChangeInvalidatesTriggerState) {
+    HotcueControl cue(QStringLiteral("[revision]"), 0);
+    int changes = 0;
+    QObject::connect(
+            &cue,
+            &HotcueControl::triggerStateChanged,
+            &cue,
+            [&changes] { ++changes; },
+            Qt::DirectConnection);
+    cue.setStatus(HotcueControl::Status::Active);
+    EXPECT_EQ(1, changes);
+    cue.setPosition(mixxx::audio::FramePos(8));
+    EXPECT_EQ(2, changes);
+    cue.setEndPosition(mixxx::audio::FramePos(4));
+    EXPECT_EQ(3, changes);
+}
 
 TEST_F(ReadAheadManagerTest, StretchChunkBoundaryAndMissAreTransactional) {
     const SINT boundary = CachingReaderChunk::kFrames * 2;
@@ -193,6 +321,437 @@ TEST_F(ReadAheadManagerTest, StretchChunkBoundaryAndMissAreTransactional) {
     EXPECT_EQ(boundary + 1024, m_pReadAheadManager->getFilePlaypositionFromLog(boundary, 1024));
 }
 
+TEST_F(ReadAheadManagerTest, WrapMetadataWaitsForDeliveredReadAndSeekDiscardsIt) {
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(8, 4);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    ASSERT_FALSE(read.unavailable);
+    ASSERT_EQ(8, read.samplesRead);
+    ASSERT_EQ(1u, readLogSize());
+    EXPECT_TRUE(firstReadLogEntryHasWrap());
+
+    m_pReadAheadManager->notifySeek(32);
+    EXPECT_EQ(0u, readLogSize());
+}
+
+TEST_F(ReadAheadManagerTest, RealLoopEditMissDoesNotCommitQueryHistory) {
+    using FramePos = mixxx::audio::FramePos;
+    m_pLoopControl->useRealControl = true;
+    m_pLoopControl->setLoop(FramePos(0), FramePos(8), true);
+    ControlObject::set(ConfigKey(kGroup, "loop_enabled"), 1);
+    m_pReadAheadManager->notifySeek(4);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    ASSERT_FALSE(m_pReadAheadManager->getNextSamplesForStretch(
+                                            1, m_pBuffer, 2, mixxx::audio::ChannelCount::stereo())
+                    .unavailable);
+    ASSERT_EQ(FramePos(0), m_pLoopControl->readTriggerState().oldLoopInfo.startPosition);
+
+    setChangedLoop(FramePos(4), FramePos(12), LoopingControl::LoopSeekMode::MovedOut);
+    m_pReader->miss = true;
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    ASSERT_TRUE(m_pReadAheadManager->getNextSamplesForStretch(
+                                           1, m_pBuffer, 2, mixxx::audio::ChannelCount::stereo())
+                    .unavailable);
+    // No input from the edited loop was accepted: preserve the old baseline.
+    EXPECT_EQ(FramePos(0), m_pLoopControl->readTriggerState().oldLoopInfo.startPosition);
+
+    setChangedLoop(FramePos(16), FramePos(24), LoopingControl::LoopSeekMode::Changed);
+    m_pReader->miss = false;
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    const auto move = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 2, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(move.unavailable);
+    EXPECT_EQ(0, move.samplesRead);
+    // Original frame 3 moves by 16 frames; the failed four-frame edit
+    // must not change its phase within the original eight-frame loop.
+    EXPECT_DOUBLE_EQ(FramePos(19).toEngineSamplePos(), m_pReadAheadManager->getPlaypos());
+    EXPECT_EQ(FramePos(16), m_pLoopControl->readTriggerState().oldLoopInfo.startPosition);
+}
+
+TEST_F(ReadAheadManagerTest, RealOneShotCueSurvivesSecondaryMissAndUnrelatedEdit) {
+    m_pCueControl->useRealControl = true;
+    hotcue(0)->setPosition(mixxx::audio::FramePos(2));
+    hotcue(0)->setEndPosition(mixxx::audio::FramePos(4));
+    hotcue(0)->setType(mixxx::CueType::Jump);
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+    m_pReadAheadManager->notifySeek(2);
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReader->failOnRead = 2;
+    ASSERT_TRUE(m_pReadAheadManager->getNextSamplesForStretch(
+                                           1, m_pBuffer, 8, mixxx::audio::ChannelCount::stereo())
+                    .unavailable);
+    EXPECT_EQ(HotcueControl::Status::Active, hotcue(0)->getStatus());
+    EXPECT_DOUBLE_EQ(2.0, m_pReadAheadManager->getPlaypos());
+    hotcue(1)->setPosition(mixxx::audio::FramePos(20));
+    m_pReader->failOnRead = -1;
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    const auto retry = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 8, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(retry.unavailable);
+    EXPECT_EQ(6, retry.samplesRead);
+    EXPECT_DOUBLE_EQ(4.0, m_pReadAheadManager->getPlaypos());
+    EXPECT_EQ(HotcueControl::Status::Set, hotcue(0)->getStatus());
+}
+
+TEST_F(ReadAheadManagerTest, CueCommitCannotDisarmAnotherMatchingCueAfterAnEdit) {
+    using mixxx::audio::FramePos;
+    for (int i = 0; i < 2; ++i) {
+        hotcue(i)->setPosition(FramePos(2));
+        hotcue(i)->setEndPosition(FramePos(4));
+        hotcue(i)->setType(mixxx::CueType::Jump);
+        hotcue(i)->setStatus(HotcueControl::Status::Active);
+    }
+    FramePos target;
+    const auto trigger = m_pCueControl->CueControl::nextTrigger(
+            false, FramePos(0), &target, 8, false);
+    ASSERT_EQ(FramePos(4), trigger);
+    ASSERT_EQ(FramePos(2), target);
+    hotcue(0)->setEndPosition(FramePos(6));
+    m_pCueControl->commitTrigger(trigger, target, false);
+    EXPECT_EQ(HotcueControl::Status::Active, hotcue(0)->getStatus());
+    EXPECT_EQ(HotcueControl::Status::Active, hotcue(1)->getStatus());
+}
+
+TEST_F(ReadAheadManagerTest, CueCommitConsumesFrozenDecisionOnceWithoutAllocation) {
+    using mixxx::audio::FramePos;
+    hotcue(0)->setPosition(FramePos(2));
+    hotcue(0)->setEndPosition(FramePos(4));
+    hotcue(0)->setType(mixxx::CueType::Jump);
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+    FramePos target;
+    const auto trigger = m_pCueControl->CueControl::nextTrigger(
+            false, FramePos(0), &target, 8, false);
+    mixxxtest::callbackAllocations = 0;
+    mixxxtest::callbackDeallocations = 0;
+    const bool previousCounting = mixxxtest::countCallbackAllocations;
+    mixxxtest::countCallbackAllocations = true;
+    m_pCueControl->commitTrigger(trigger, target, false);
+    mixxxtest::countCallbackAllocations = previousCounting;
+    EXPECT_EQ(HotcueControl::Status::Set, hotcue(0)->getStatus());
+    EXPECT_EQ(0u, mixxxtest::callbackAllocations);
+    EXPECT_EQ(0u, mixxxtest::callbackDeallocations);
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+    m_pCueControl->commitTrigger(trigger, target, false);
+    EXPECT_EQ(HotcueControl::Status::Active, hotcue(0)->getStatus());
+}
+
+TEST_F(ReadAheadManagerTest, CueQuantizationChangesInvalidatePendingPlans) {
+    const auto beforeQuantize = m_pCueControl->CueControl::triggerRevision();
+    ControlObject::set(ConfigKey(kGroup, "quantize"), 1);
+    EXPECT_GT(m_pCueControl->CueControl::triggerRevision(), beforeQuantize);
+    const auto beforeBeats = m_pCueControl->CueControl::triggerRevision();
+    m_pCueControl->trackBeatsUpdated(nullptr);
+    EXPECT_GT(m_pCueControl->CueControl::triggerRevision(), beforeBeats);
+}
+
+TEST_F(ReadAheadManagerTest, RetryableMissReusesStatefulTriggerDecisions) {
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(8, 4);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReader->miss = true;
+    const auto miss = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    ASSERT_TRUE(miss.unavailable);
+    EXPECT_EQ(1, m_pLoopControl->queryCount);
+    EXPECT_EQ(1, m_pCueControl->queryCount);
+
+    m_pReader->miss = false;
+    const auto retry = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(retry.unavailable);
+    EXPECT_EQ(8, retry.samplesRead);
+    EXPECT_EQ(1, m_pLoopControl->queryCount);
+    EXPECT_EQ(1, m_pCueControl->queryCount);
+}
+
+TEST_F(ReadAheadManagerTest, ProviderRevisionChangeDuringQueryRejectsStaleDecision) {
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(4, 8);
+    m_pCueControl->bumpRevisionOnQuery = true;
+    m_pReader->miss = true;
+    const auto edited = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    ASSERT_TRUE(edited.unavailable);
+    EXPECT_EQ(0, edited.samplesRead);
+    EXPECT_EQ(0, m_pReader->readCount);
+    EXPECT_DOUBLE_EQ(0.0, m_pReadAheadManager->getPlaypos());
+    EXPECT_EQ(0u, readLogSize());
+    for (int i = 0; i < 16; ++i) {
+        EXPECT_FLOAT_EQ(0.0f, m_pBuffer[i]);
+    }
+
+    m_pReader->miss = false;
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(6, 10);
+    const auto retry = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(retry.unavailable);
+    EXPECT_EQ(6, retry.samplesRead);
+    EXPECT_DOUBLE_EQ(10.0, m_pReadAheadManager->getPlaypos());
+    EXPECT_EQ(2, m_pLoopControl->queryCount);
+    EXPECT_EQ(2, m_pCueControl->queryCount);
+}
+
+TEST_F(ReadAheadManagerTest, LoopTopologyChangeInvalidatesPendingPlan) {
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(8, 4);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReader->miss = true;
+    ASSERT_TRUE(m_pReadAheadManager->getNextSamplesForStretch(
+                                           1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo())
+                    .unavailable);
+
+    m_pLoopControl->bumpTriggerRevision();
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReader->miss = false;
+    const auto retry = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(retry.unavailable);
+    EXPECT_EQ(16, retry.samplesRead);
+    EXPECT_EQ(2, m_pLoopControl->queryCount);
+    EXPECT_EQ(2, m_pCueControl->queryCount);
+}
+
+TEST_F(ReadAheadManagerTest, CueTopologyChangeInvalidatesPendingPlan) {
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(8, 4);
+    m_pReader->miss = true;
+    ASSERT_TRUE(m_pReadAheadManager->getNextSamplesForStretch(
+                                           1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo())
+                    .unavailable);
+
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->bumpTriggerRevision();
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReader->miss = false;
+    const auto retry = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(retry.unavailable);
+    EXPECT_EQ(16, retry.samplesRead);
+    EXPECT_EQ(2, m_pLoopControl->queryCount);
+    EXPECT_EQ(2, m_pCueControl->queryCount);
+}
+
+TEST_F(ReadAheadManagerTest, ScalarReadInvalidatesPendingStretchTriggerPlan) {
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReader->miss = true;
+    ASSERT_TRUE(m_pReadAheadManager->getNextSamplesForStretch(
+                                           1, m_pBuffer, 10, mixxx::audio::ChannelCount::stereo())
+                    .unavailable);
+
+    m_pReader->miss = false;
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    EXPECT_EQ(10,
+            m_pReadAheadManager->getNextSamples(
+                    1, m_pBuffer, 10, mixxx::audio::ChannelCount::stereo()));
+    EXPECT_EQ(2, m_pLoopControl->queryCount);
+    EXPECT_EQ(2, m_pCueControl->queryCount);
+}
+
+TEST_F(ReadAheadManagerTest, RateControlNotifiedOnlyAfterPositiveWrappedConsumption) {
+    m_pReadAheadManager->addRateControl(&m_rateControl);
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(8, 4);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    ASSERT_EQ(8, read.samplesRead);
+
+    EXPECT_DOUBLE_EQ(0.0, m_pReadAheadManager->getFilePlaypositionFromLog(0, 0));
+    EXPECT_EQ(0, rateControlWrapAroundCount());
+    EXPECT_DOUBLE_EQ(1.0, m_pReadAheadManager->getFilePlaypositionFromLog(0, 1));
+    EXPECT_EQ(0, rateControlWrapAroundCount());
+    EXPECT_DOUBLE_EQ(8.0, m_pReadAheadManager->getFilePlaypositionFromLog(1, 7));
+    EXPECT_EQ(0, rateControlWrapAroundCount());
+
+    m_pLoopControl->pushValues(8, 4);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    ASSERT_EQ(2,
+            m_pReadAheadManager
+                    ->getNextSamplesForStretch(1,
+                            m_pBuffer,
+                            2,
+                            mixxx::audio::ChannelCount::stereo())
+                    .samplesRead);
+    EXPECT_DOUBLE_EQ(5.0, m_pReadAheadManager->getFilePlaypositionFromLog(8, 1));
+    EXPECT_EQ(1, rateControlWrapAroundCount());
+}
+
+TEST_F(ReadAheadManagerTest, MultipleWrapsRetireOnceWithoutCallbackAllocation) {
+    m_pReadAheadManager->addRateControl(&m_rateControl);
+    m_pReadAheadManager->notifySeek(0);
+    for (int i = 0; i < 3; ++i) {
+        m_pLoopControl->pushValues(8, 4);
+        m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+        const SINT requested = i == 2 ? 2 : 16;
+        ASSERT_FALSE(m_pReadAheadManager
+                        ->getNextSamplesForStretch(1,
+                                m_pBuffer,
+                                requested,
+                                mixxx::audio::ChannelCount::stereo())
+                        .unavailable);
+    }
+    EXPECT_EQ(0, rateControlWrapAroundCount());
+    mixxxtest::callbackAllocations = 0;
+    mixxxtest::callbackDeallocations = 0;
+    const bool previousCounting = mixxxtest::countCallbackAllocations;
+    mixxxtest::countCallbackAllocations = true;
+    const double atBoundary = m_pReadAheadManager->getFilePlaypositionFromLog(0, 12);
+    const int firstWraps = rateControlWrapAroundCount();
+    const double afterBoundary = m_pReadAheadManager->getFilePlaypositionFromLog(atBoundary, 2);
+    mixxxtest::countCallbackAllocations = previousCounting;
+    EXPECT_DOUBLE_EQ(8.0, atBoundary);
+    EXPECT_EQ(1, firstWraps);
+    EXPECT_DOUBLE_EQ(6.0, afterBoundary);
+    EXPECT_EQ(2, rateControlWrapAroundCount());
+    EXPECT_EQ(0u, mixxxtest::callbackAllocations);
+    EXPECT_EQ(0u, mixxxtest::callbackDeallocations);
+}
+
+TEST_F(ReadAheadManagerTest, ReverseWrapWaitsForPostBoundaryConsumption) {
+    m_pReadAheadManager->addRateControl(&m_rateControl);
+    m_pReadAheadManager->notifySeek(12);
+    m_pLoopControl->pushValues(4, 12);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    ASSERT_EQ(8,
+            m_pReadAheadManager
+                    ->getNextSamplesForStretch(-1,
+                            m_pBuffer,
+                            16,
+                            mixxx::audio::ChannelCount::stereo())
+                    .samplesRead);
+    m_pLoopControl->pushValues(4, 12);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    ASSERT_EQ(2,
+            m_pReadAheadManager
+                    ->getNextSamplesForStretch(-1,
+                            m_pBuffer,
+                            2,
+                            mixxx::audio::ChannelCount::stereo())
+                    .samplesRead);
+    EXPECT_EQ(0, rateControlWrapAroundCount());
+    EXPECT_DOUBLE_EQ(11.0, m_pReadAheadManager->getFilePlaypositionFromLog(12, 1));
+    EXPECT_EQ(0, rateControlWrapAroundCount());
+    EXPECT_DOUBLE_EQ(4.0, m_pReadAheadManager->getFilePlaypositionFromLog(11, 7));
+    EXPECT_EQ(0, rateControlWrapAroundCount());
+    EXPECT_DOUBLE_EQ(11.0, m_pReadAheadManager->getFilePlaypositionFromLog(4, 1));
+    EXPECT_EQ(1, rateControlWrapAroundCount());
+}
+
+TEST_F(ReadAheadManagerTest, InvalidTrackEndDoesNotOverflowReverseCrossfade) {
+    m_pLoopControl->setFrameInfo(mixxx::audio::FramePos(0),
+            mixxx::audio::kInvalidFramePos,
+            mixxx::audio::SampleRate(44100));
+    m_pReadAheadManager->notifySeek(12);
+    m_pLoopControl->pushValues(4, 12);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+            -1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(read.unavailable);
+    ASSERT_EQ(8, read.samplesRead);
+    EXPECT_EQ(1, m_pReader->readCount);
+    for (SINT i = 0; i < read.samplesRead; ++i) {
+        EXPECT_TRUE(std::isfinite(m_pBuffer[i]));
+    }
+}
+
+TEST_F(ReadAheadManagerTest, RateControlRetainsWrapAcrossEmptyMappingUntilPositiveRead) {
+    m_pReadAheadManager->addRateControl(&m_rateControl);
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(0, 4);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    ASSERT_EQ(0,
+            m_pReadAheadManager
+                    ->getNextSamplesForStretch(1,
+                            m_pBuffer,
+                            2,
+                            mixxx::audio::ChannelCount::stereo())
+                    .samplesRead);
+    EXPECT_DOUBLE_EQ(0.0, m_pReadAheadManager->getFilePlaypositionFromLog(0, 0));
+    EXPECT_EQ(0, rateControlWrapAroundCount());
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    const auto afterBoundary = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 2, mixxx::audio::ChannelCount::stereo());
+    ASSERT_EQ(2, afterBoundary.samplesRead);
+    EXPECT_DOUBLE_EQ(5.0, m_pReadAheadManager->getFilePlaypositionFromLog(0, 1));
+    EXPECT_EQ(1, rateControlWrapAroundCount());
+}
+
+TEST_F(ReadAheadManagerTest, RateControlReceivesSelectedJumpTrigger) {
+    m_pReadAheadManager->addRateControl(&m_rateControl);
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(8, 2);
+    m_pCueControl->pushValues(6, 4);
+    const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    ASSERT_EQ(6, read.samplesRead);
+    EXPECT_DOUBLE_EQ(6.0, m_pReadAheadManager->getFilePlaypositionFromLog(0, 6));
+    EXPECT_EQ(0, rateControlWrapAroundCount());
+    m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    ASSERT_EQ(2,
+            m_pReadAheadManager
+                    ->getNextSamplesForStretch(1,
+                            m_pBuffer,
+                            2,
+                            mixxx::audio::ChannelCount::stereo())
+                    .samplesRead);
+    EXPECT_DOUBLE_EQ(5.0, m_pReadAheadManager->getFilePlaypositionFromLog(6, 1));
+    EXPECT_EQ(1, rateControlWrapAroundCount());
+    EXPECT_EQ(mixxx::audio::FramePos::fromEngineSamplePosMaybeInvalid(6),
+            rateControlJumpPosition());
+    EXPECT_EQ(mixxx::audio::FramePos::fromEngineSamplePosMaybeInvalid(4),
+            rateControlTargetPosition());
+}
+
+TEST_F(ReadAheadManagerTest, StretchCrossfadeMissCanRetryWithoutCommittingRead) {
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(8, 4);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReader->failOnRead = 2; // Primary succeeds; crossfade read misses.
+
+    const auto unavailable = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    ASSERT_TRUE(unavailable.unavailable);
+    EXPECT_EQ(0, unavailable.samplesRead);
+    EXPECT_EQ(0, m_pReadAheadManager->getPlaypos());
+    EXPECT_EQ(0u, readLogSize());
+
+    m_pReader->failOnRead = -1;
+    m_pReader->readCount = 0;
+    const auto retry = m_pReadAheadManager->getNextSamplesForStretch(
+            1, m_pBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    EXPECT_FALSE(retry.unavailable);
+    EXPECT_EQ(8, retry.samplesRead);
+    EXPECT_EQ(4, m_pReadAheadManager->getPlaypos());
+    EXPECT_EQ(1, m_pLoopControl->queryCount);
+    EXPECT_EQ(1, m_pCueControl->queryCount);
+
+    // Re-anchor the same controls for the all-available reference; creating
+    // another control owner in this group would violate ControlObject identity.
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(8, 4);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReader->readCount = 0;
+    CSAMPLE referenceBuffer[16]{};
+    const auto reference = m_pReadAheadManager->getNextSamplesForStretch(
+            1, referenceBuffer, 16, mixxx::audio::ChannelCount::stereo());
+    ASSERT_FALSE(reference.unavailable);
+    ASSERT_EQ(retry.samplesRead, reference.samplesRead);
+    for (SINT i = 0; i < retry.samplesRead; ++i) {
+        EXPECT_FLOAT_EQ(referenceBuffer[i], m_pBuffer[i]);
+    }
+}
+
 TEST_F(ReadAheadManagerTest, ReadLogCapacityGuardsZeroLengthEntrySaturationAndRecovers) {
     fillReadLogWithZeroLengthEntries();
     ASSERT_EQ(readLogCapacity(), readLogSize());
@@ -200,6 +759,8 @@ TEST_F(ReadAheadManagerTest, ReadLogCapacityGuardsZeroLengthEntrySaturationAndRe
             1, m_pBuffer, 2, mixxx::audio::ChannelCount::stereo());
     EXPECT_TRUE(saturated.unavailable);
     EXPECT_EQ(0, saturated.samplesRead);
+    EXPECT_EQ(0, m_pLoopControl->queryCount);
+    EXPECT_EQ(0, m_pCueControl->queryCount);
 
     EXPECT_EQ(static_cast<double>(readLogCapacity() - 1) * 2,
             m_pReadAheadManager->getFilePlaypositionFromLog(0, 1));

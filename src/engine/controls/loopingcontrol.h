@@ -2,6 +2,8 @@
 
 #include <QObject>
 #include <QStack>
+#include <atomic>
+#include <cstdint>
 
 #include "control/controlvalue.h"
 #include "engine/controls/enginecontrol.h"
@@ -32,11 +34,16 @@ class LoopingControl : public EngineControl {
             mixxx::audio::FramePos currentPosition,
             const std::size_t bufferSize) override;
 
-    // nextTrigger returns the sample at which the engine will be triggered to
-    // take a loop, given the value of currentPosition and the playback direction.
+    struct ReadTriggerState;
+    // Supplying nextState evaluates without committing callback-owned trigger
+    // history. ReadAheadManager commits it only after both cache reads succeed.
     virtual mixxx::audio::FramePos nextTrigger(bool reverse,
             mixxx::audio::FramePos currentPosition,
-            mixxx::audio::FramePos* pTargetPosition);
+            mixxx::audio::FramePos* pTargetPosition,
+            ReadTriggerState* nextState = nullptr);
+    virtual std::uint64_t triggerRevision() const {
+        return m_triggerRevision.load(std::memory_order_relaxed);
+    }
 
     // hintReader will add to hintList hints both the loop in and loop out
     // sample, if set.
@@ -77,6 +84,21 @@ class LoopingControl : public EngineControl {
         mixxx::audio::FramePos endPosition = mixxx::audio::kInvalidFramePos;
         LoopSeekMode seekMode = LoopSeekMode::None;
     };
+
+    struct ReadTriggerState {
+        LoopInfo oldLoopInfo;
+        bool adjustingInOld = false;
+        bool adjustingOutOld = false;
+    };
+    // Callback-only query history, distinct from editable loop configuration.
+    ReadTriggerState readTriggerState() const {
+        return {m_oldLoopInfo, m_bAdjustingLoopInOld, m_bAdjustingLoopOutOld};
+    }
+    void commitReadTriggerState(const ReadTriggerState& state) {
+        m_oldLoopInfo = state.oldLoopInfo;
+        m_bAdjustingLoopInOld = state.adjustingInOld;
+        m_bAdjustingLoopOutOld = state.adjustingOutOld;
+    }
 
     LoopInfo getLoopInfo() {
         return m_loopInfo.getValue();
@@ -160,7 +182,12 @@ class LoopingControl : public EngineControl {
     void slotLoopEnabledValueChangeRequest(double enabled);
 
   private:
+    friend class ReadAheadManagerTest;
     void setLoopingEnabled(bool enabled);
+    void setLoopInfo(const LoopInfo& loopInfo);
+    void invalidateTriggerPlan() {
+        m_triggerRevision.fetch_add(1, std::memory_order_relaxed);
+    }
     void repeatToggled(double value);
     void setLoopInToCurrentPosition();
     void setLoopOutToCurrentPosition();
@@ -236,6 +263,8 @@ class LoopingControl : public EngineControl {
     bool m_bLoopOutPressedWhileLoopDisabled;
     QStack<double> m_activeLoopRolls;
     ControlValueAtomic<LoopInfo> m_loopInfo;
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+    std::atomic<std::uint64_t> m_triggerRevision{0};
     ControlValueAtomic<LoopInfo> m_prevLoopInfo;
     double m_prevLoopSize;
     LoopInfo m_oldLoopInfo;

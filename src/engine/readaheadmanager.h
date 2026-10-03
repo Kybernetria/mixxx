@@ -1,10 +1,12 @@
 #pragma once
 
+#include <cstdint>
 #include <gsl/pointers>
 #include <memory>
 
 #include "audio/frame.h"
 #include "engine/cachingreader/cachingreader.h"
+#include "engine/controls/loopingcontrol.h"
 #include "engine/stretchinputbounds.h"
 #include "util/math.h"
 #include "util/types.h"
@@ -93,9 +95,27 @@ class ReadAheadManager {
 
     /// An entry in the read log indicates the virtual playposition the read
     /// began at and the virtual playposition it ended at.
+    struct PendingTriggerPlan {
+        bool active{false};
+        double position{0};
+        double rate{0};
+        SINT requestedSamples{0};
+        mixxx::audio::ChannelCount channelCount{0};
+        mixxx::audio::FramePos loopTrigger;
+        mixxx::audio::FramePos loopTarget;
+        mixxx::audio::FramePos jumpTrigger;
+        mixxx::audio::FramePos jumpTarget;
+        std::uint64_t loopRevision{0};
+        std::uint64_t cueRevision{0};
+        LoopingControl::ReadTriggerState nextLoopState;
+    };
+
     struct ReadLogEntry {
         double virtualPlaypositionStart;
         double virtualPlaypositionEndNonInclusive;
+        bool hasWrapAround = false;
+        mixxx::audio::FramePos wrapTrigger;
+        mixxx::audio::FramePos wrapTarget;
 
         ReadLogEntry() = default;
 
@@ -131,6 +151,9 @@ class ReadAheadManager {
         }
 
         bool merge(const ReadLogEntry& other) {
+            if (hasWrapAround || other.hasWrapAround) {
+                return false;
+            }
             // Allow 0-length ReadLogEntry's to merge regardless of their
             // direction if they have the right start point.
             if ((other.length() == 0 || direction() == other.direction()) &&
@@ -146,7 +169,10 @@ class ReadAheadManager {
     /// virtualPlaypositionEnd is the first sample in the direction that was
     /// read that was NOT read as part of this log entry.
     void addReadLogEntry(double virtualPlaypositionStart,
-                         double virtualPlaypositionEndNonInclusive);
+            double virtualPlaypositionEndNonInclusive,
+            bool hasWrapAround = false,
+            mixxx::audio::FramePos wrapTrigger = {},
+            mixxx::audio::FramePos wrapTarget = {});
 
     LoopingControl* m_pLoopingControl;
     CueControl* m_pCueControl;
@@ -165,6 +191,7 @@ class ReadAheadManager {
             std::make_unique<ReadLogEntry[]>(kReadLogCapacity)};
     std::size_t m_readLogStart = 0;
     std::size_t m_readLogSize = 0;
+    PendingTriggerPlan m_pendingTriggerPlan;
     double m_currentPosition; // In absolute samples
     CachingReader* m_pReader;
     CSAMPLE* m_pCrossFadeBuffer;

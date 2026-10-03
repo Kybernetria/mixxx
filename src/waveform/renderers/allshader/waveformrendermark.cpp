@@ -15,6 +15,7 @@
 #include "util/assert.h"
 #include "util/colorcomponents.h"
 #include "util/roundtopixel.h"
+#include "waveform/beatcountdown.h"
 #include "waveform/renderers/allshader/digitsrenderer.h"
 #include "waveform/renderers/waveformwidgetrenderer.h"
 #include "waveform/waveformwidgetfactory.h"
@@ -36,14 +37,14 @@ const double kDefaultNextMarkPosition = std::numeric_limits<double>::max();
 
 class WaveformMarkNode : public rendergraph::GeometryNode {
   public:
-    WaveformMark* m_pOwner{};
+    QWeakPointer<WaveformMark> m_pOwner;
     bool m_isEndMark{false};
 
-    WaveformMarkNode(WaveformMark* pOwner,
+    WaveformMarkNode(const WaveformMarkPointer& pOwner,
             bool isEndMark,
             rendergraph::Context* pContext,
             const QImage& image)
-            : m_pOwner(pOwner),
+            : m_pOwner(pOwner.toWeakRef()),
               m_isEndMark(isEndMark) {
         initForRectangles<TextureMaterial>(1);
         updateTexture(pContext, image);
@@ -89,7 +90,7 @@ class WaveformMarkNode : public rendergraph::GeometryNode {
 
 class WaveformMarkNodeGraphics : public WaveformMark::Graphics {
   public:
-    WaveformMarkNodeGraphics(WaveformMark* pOwner,
+    WaveformMarkNodeGraphics(const WaveformMarkPointer& pOwner,
             bool isEndMark,
             rendergraph::Context* pContext,
             const QImage& image)
@@ -302,11 +303,19 @@ void allshader::WaveformRenderMark::update() {
     while (auto* pChild = m_pMarkNodesParent->firstChild()) {
         auto pNode = m_pMarkNodesParent->detachChildNode(pChild);
         WaveformMarkNode* pWaveformMarkNode = static_cast<WaveformMarkNode*>(pNode.get());
-        // Determine its WaveformMark
-        auto* pMark = pWaveformMarkNode->m_pOwner;
+        // The mark may have been removed since the node was rendered. Keep it
+        // alive while returning the node to its graphics, or let the detached
+        // node be destroyed here while the render context is current.
+        const WaveformMarkPointer pMark = pWaveformMarkNode->m_pOwner.toStrongRef();
+        if (!pMark) {
+            continue;
+        }
         auto* pGraphics = static_cast<WaveformMarkNodeGraphics*>(
                 pWaveformMarkNode->m_isEndMark ? pMark->m_pEndGraphics.get()
                                                : pMark->m_pGraphics.get());
+        VERIFY_OR_DEBUG_ASSERT(pGraphics) {
+            continue;
+        }
         // Store the nodes with the WaveformMark
         pGraphics->attachNode(std::move(pNode));
     }
@@ -497,7 +506,7 @@ void allshader::WaveformRenderMark::updateDigitsNodeForUntilMark(float x) {
 
     const QString beatsUntilMark =
             m_untilMarkShowBeats && m_beatsUntilMark > 0
-            ? QString::number(m_beatsUntilMark)
+            ? mixxx::formatBeatCountdown(m_beatsUntilMark)
             : QString{};
     const QString timeUntilMark =
             m_untilMarkShowTime && m_timeUntilMark > 0.0
@@ -635,7 +644,7 @@ void allshader::WaveformRenderMark::drawTriangle(QPainter* painter,
 void allshader::WaveformRenderMark::updateMarkImage(WaveformMarkPointer pMark) {
     if (!pMark->m_pGraphics) {
         pMark->m_pGraphics =
-                std::make_unique<WaveformMarkNodeGraphics>(pMark.get(),
+                std::make_unique<WaveformMarkNodeGraphics>(pMark,
                         false,
                         m_waveformRenderer->getContext(),
                         pMark->generateImage(
@@ -650,7 +659,7 @@ void allshader::WaveformRenderMark::updateMarkImage(WaveformMarkPointer pMark) {
 void allshader::WaveformRenderMark::updateEndMarkImage(WaveformMarkPointer pMark) {
     if (!pMark->m_pEndGraphics) {
         pMark->m_pEndGraphics =
-                std::make_unique<WaveformMarkNodeGraphics>(pMark.get(),
+                std::make_unique<WaveformMarkNodeGraphics>(pMark,
                         true,
                         m_waveformRenderer->getContext(),
                         pMark->generateEndImage(

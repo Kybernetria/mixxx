@@ -409,15 +409,18 @@ double RateControl::calculateSpeed(double baserate,
     processTempRate(samplesPerBuffer);
 
     double rate;
+    double wheelFactor = 0.0;
+    bool bVinylControlEnabled = false;
+    bool useScratch2Value = false;
     const double searching = m_pRateSearch->get();
     if (searching != 0) {
         // If searching is in progress, it overrides everything else
         rate = searching;
     } else {
-        double wheelFactor = getWheelFactor();
+        wheelFactor = getWheelFactor();
         double jogFactor = getJogFactor();
-        bool bVinylControlEnabled = m_pVCEnabled && m_pVCEnabled->toBool();
-        bool useScratch2Value = m_pScratch2Enable->toBool();
+        bVinylControlEnabled = m_pVCEnabled && m_pVCEnabled->toBool();
+        useScratch2Value = m_pScratch2Enable->toBool();
 
         // By default scratch2_enable is enough to determine if the user is
         // scratching or not. Moving platter controllers have to disable
@@ -489,6 +492,7 @@ double RateControl::calculateSpeed(double baserate,
                     !bVinylControlEnabled && !useScratch2Value) {
                 if (m_pBpmControl == nullptr) {
                     qDebug() << "ERROR: calculateRate m_pBpmControl is null during sync lock";
+                    m_naturalPlaybackSpeed = 1.0;
                     return 1.0;
                 }
 
@@ -510,6 +514,22 @@ double RateControl::calculateSpeed(double baserate,
                 rate = -rate;
                 *pReportReverse = true;
             }
+        }
+    }
+
+    // Vinyl control has no reliable natural transport rate while scratching;
+    // retain its historical policy rather than guessing one here.
+    m_naturalPlaybackSpeed = rate;
+    if (searching == 0 && !bVinylControlEnabled && *pReportScratching) {
+        // Scratch controllers replace the audible rate, but slip follows the
+        // rate that would have played without their foreground motion.
+        m_naturalPlaybackSpeed = paused
+                ? 0.0
+                : math_max(speed + getTempRate(), 0.0) + wheelFactor;
+        // Reverse is a transport modifier even when scratch2 overrides the
+        // audible rate and therefore suppresses the actual reverse branch.
+        if (m_pReverseButton->toBool()) {
+            m_naturalPlaybackSpeed = -m_naturalPlaybackSpeed;
         }
     }
     return rate;

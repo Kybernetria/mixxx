@@ -81,8 +81,9 @@ void appendCueHint(gsl::not_null<HintVector*> pHintList, const double playPos, H
 bool isValidJumpCue(HotcueControl* pControl,
         HotcueControl::Status desiredStatus = HotcueControl::Status::Active) {
     DEBUG_ASSERT(pControl != nullptr);
-    return pControl->getCue() != nullptr &&
-            pControl->getCue()->getType() == mixxx::CueType::Jump &&
+    // Trigger queries use published scalar controls, not Cue ownership or
+    // model locks on the audio callback.
+    return pControl->getType() == mixxx::CueType::Jump &&
             pControl->getStatus() == desiredStatus &&
             pControl->getPosition().isValid() &&
             pControl->getEndPosition().isValid();
@@ -154,13 +155,18 @@ CueControl::~CueControl() {
 mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
         mixxx::audio::FramePos currentPosition,
         mixxx::audio::FramePos* pTargetPosition,
-        mixxx::audio::FrameDiff_t lookAheadFrames) {
+        mixxx::audio::FrameDiff_t lookAheadFrames,
+        bool commitState) {
+    m_pendingReadTrigger = {};
     VERIFY_OR_DEBUG_ASSERT(pTargetPosition) {
         return mixxx::audio::kInvalidFramePos;
     }
+    const auto revision = triggerRevision();
     *pTargetPosition = mixxx::audio::kInvalidFramePos;
     mixxx::audio::FramePos triggerPosition = mixxx::audio::kInvalidFramePos;
     HotcueControl* pNextJump = nullptr;
+    mixxx::audio::FramePos selectedPosition;
+    mixxx::audio::FramePos selectedEndPosition;
     // Find the first saved cue that is next to be played (either first after
     // the play position, or first before in playing in reverse)
     for (const auto& pControl : std::as_const(m_hotcueControls)) {
@@ -168,27 +174,44 @@ mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
             continue;
         }
 
+        const auto position = pControl->getPosition();
+        const auto endPosition = pControl->getEndPosition();
+        bool selected = false;
         if (!reverse) {
             // Saved jumps store the position to jump from as their end position
-            if (pControl->getEndPosition() >= currentPosition &&
-                    (!triggerPosition.isValid() || pControl->getEndPosition() < triggerPosition)) {
-                triggerPosition = quantizeCuePoint(pControl->getEndPosition());
-                *pTargetPosition = quantizeCuePoint(pControl->getPosition());
-                pNextJump = pControl;
+            if (endPosition >= currentPosition &&
+                    (!triggerPosition.isValid() || endPosition < triggerPosition)) {
+                triggerPosition = quantizeCuePoint(endPosition);
+                *pTargetPosition = quantizeCuePoint(position);
+                selected = true;
             }
         } else {
             // Saved jumps store the position to jump from as their end
             // position, but here we want to take the jump backward
-            if (pControl->getPosition() <= currentPosition &&
-                    (!triggerPosition.isValid() || pControl->getPosition() > triggerPosition)) {
-                triggerPosition = quantizeCuePoint(pControl->getPosition());
-                *pTargetPosition = quantizeCuePoint(pControl->getEndPosition());
-                pNextJump = pControl;
+            if (position <= currentPosition &&
+                    (!triggerPosition.isValid() || position > triggerPosition)) {
+                triggerPosition = quantizeCuePoint(position);
+                *pTargetPosition = quantizeCuePoint(endPosition);
+                selected = true;
             }
+        }
+        if (selected) {
+            pNextJump = pControl;
+            selectedPosition = position;
+            selectedEndPosition = endPosition;
         }
     }
 
-    if (pNextJump != nullptr &&
+    if (!commitState && pNextJump) {
+        m_pendingReadTrigger = {pNextJump,
+                selectedPosition,
+                selectedEndPosition,
+                triggerPosition,
+                *pTargetPosition,
+                revision,
+                reverse};
+    }
+    if (commitState && pNextJump != nullptr &&
             pNextJump->getPosition() < pNextJump->getEndPosition() &&
             currentPosition + lookAheadFrames > pNextJump->getEndPosition()) {
         // If the saved jump is backward, we reset the Active status after the jump
@@ -198,7 +221,26 @@ mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
     return triggerPosition;
 }
 
+void CueControl::commitTrigger(mixxx::audio::FramePos triggerPosition,
+        mixxx::audio::FramePos targetPosition,
+        bool reverse) {
+    // The query already quantized these coordinates. Repeating that work here
+    // would enter Track::getBeats() and its mutex on the callback.
+    const auto decision = m_pendingReadTrigger;
+    m_pendingReadTrigger = {};
+    auto* pControl = decision.pControl;
+    if (pControl && decision.revision == triggerRevision() &&
+            decision.reverse == reverse && decision.trigger == triggerPosition &&
+            decision.target == targetPosition && isValidJumpCue(pControl) &&
+            pControl->getPosition() == decision.position &&
+            pControl->getEndPosition() == decision.endPosition &&
+            decision.position < decision.endPosition) {
+        pControl->setStatus(HotcueControl::Status::Set);
+    }
+}
+
 void CueControl::notifySeek(mixxx::audio::FramePos position) {
+    m_pendingReadTrigger = {};
     // Iterate over all the hotcues to find saved jump. If we sought inside the
     // jump range, ensure the jump is disabled to prevent double seek
     for (const auto& pControl : std::as_const(m_hotcueControls)) {
@@ -295,6 +337,14 @@ void CueControl::createControls() {
     // Create hotcue controls
     for (int i = 0; i < kMaxNumberOfHotcues; ++i) {
         HotcueControl* pControl = new HotcueControl(m_group, i);
+        connect(
+                pControl,
+                &HotcueControl::triggerStateChanged,
+                this,
+                [this] {
+                    m_triggerRevision.fetch_add(1, std::memory_order_relaxed);
+                },
+                Qt::DirectConnection);
         m_hotcueControls.append(pControl);
     }
 }
@@ -900,11 +950,13 @@ void CueControl::trackCuesUpdated() {
 
 void CueControl::trackBeatsUpdated(mixxx::BeatsPointer pBeats) {
     Q_UNUSED(pBeats);
+    m_triggerRevision.fetch_add(1, std::memory_order_relaxed);
     loadCuesFromTrack();
 }
 
 void CueControl::quantizeChanged(double v) {
     Q_UNUSED(v);
+    m_triggerRevision.fetch_add(1, std::memory_order_relaxed);
 
     // check if we were at the cue point before
     bool wasTrackAtCue = getTrackAt() == TrackAt::Cue;
@@ -2838,10 +2890,12 @@ void HotcueControl::slotHotcueSwap(double v) {
 }
 
 void HotcueControl::slotHotcuePositionChanged(double newPosition) {
+    emit triggerStateChanged();
     emit hotcuePositionChanged(this, newPosition);
 }
 
 void HotcueControl::slotHotcueEndPositionChanged(double newEndPosition) {
+    emit triggerStateChanged();
     emit hotcueEndPositionChanged(this, newEndPosition);
 }
 
@@ -2886,6 +2940,7 @@ void HotcueControl::setCue(const CuePointer& pCue) {
     // set pCue only if all other data is in place
     // because we have a null check for valid data else where in the code
     m_pCue = pCue;
+    emit triggerStateChanged();
 }
 mixxx::RgbColor::optional_t HotcueControl::getColor() const {
     return doubleToRgbColor(m_hotcueColor->get());
@@ -2906,14 +2961,17 @@ void HotcueControl::resetCue() {
     setEndPosition(mixxx::audio::kInvalidFramePos);
     setType(mixxx::CueType::Invalid);
     setStatus(Status::Empty);
+    emit triggerStateChanged();
 }
 
 void HotcueControl::setPosition(mixxx::audio::FramePos position) {
     m_hotcuePosition->set(position.toEngineSamplePosMaybeInvalid());
+    emit triggerStateChanged();
 }
 
 void HotcueControl::setEndPosition(mixxx::audio::FramePos endPosition) {
     m_hotcueEndPosition->set(endPosition.toEngineSamplePosMaybeInvalid());
+    emit triggerStateChanged();
 }
 
 mixxx::CueType HotcueControl::getType() const {
@@ -2924,10 +2982,12 @@ mixxx::CueType HotcueControl::getType() const {
 
 void HotcueControl::setType(mixxx::CueType type) {
     m_hotcueType->forceSet(static_cast<double>(type));
+    emit triggerStateChanged();
 }
 
 void HotcueControl::setStatus(HotcueControl::Status status) {
     m_pHotcueStatus->forceSet(static_cast<double>(status));
+    emit triggerStateChanged();
 }
 
 HotcueControl::Status HotcueControl::getStatus() const {

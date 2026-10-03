@@ -5,6 +5,8 @@
 #include <QAtomicInt>
 #include <QAtomicPointer>
 #include <QList>
+#include <atomic>
+#include <cstdint>
 
 #include "engine/controls/enginecontrol.h"
 #include "preferences/colorpalettesettings.h"
@@ -141,6 +143,7 @@ class HotcueControl : public QObject {
     void slotHotcueColorChangeRequest(double newColor);
 
   signals:
+    void triggerStateChanged();
     void hotcueSet(HotcueControl* pHotcue, double v, HotcueSetMode mode);
     void hotcueGoto(HotcueControl* pHotcue, double v);
     void hotcueGotoAndPlay(HotcueControl* pHotcue, double v);
@@ -199,11 +202,24 @@ class CueControl : public EngineControl {
     void notifySeek(mixxx::audio::FramePos position) override;
 
     /// nextTrigger returns the sample at which the engine will be triggered to
-    /// take a jump. This is only used for active saved jumps.
+    /// take a jump. This is only used for active saved jumps. With commitState
+    /// false, its scalar decision remains callback-owned until the next query
+    /// or commit/seek; a matching read-ahead retry does not query again.
     virtual mixxx::audio::FramePos nextTrigger(bool reverse,
             mixxx::audio::FramePos currentPosition,
             mixxx::audio::FramePos* pTargetPosition,
-            mixxx::audio::FrameDiff_t lookAheadFrames);
+            mixxx::audio::FrameDiff_t lookAheadFrames,
+            bool commitState = true);
+    /// Disarm the selected one-shot jump after its triggering read is accepted.
+    /// Revalidate frozen raw coordinates and revision without re-quantizing or
+    /// accessing Track/Cue models. Provider controls outlive callback use;
+    /// owner-side producer and callback quiescence is required before teardown.
+    void commitTrigger(mixxx::audio::FramePos triggerPosition,
+            mixxx::audio::FramePos targetPosition,
+            bool reverse);
+    virtual std::uint64_t triggerRevision() const {
+        return m_triggerRevision.load(std::memory_order_relaxed);
+    }
 
     void hintReader(gsl::not_null<HintVector*> pHintList) override;
     bool updateIndicatorsAndModifyPlay(bool newPlay, bool oldPlay, bool playPossible);
@@ -323,7 +339,22 @@ class CueControl : public EngineControl {
     bool m_bypassCueSetByPlay;
     ControlValueAtomic<mixxx::audio::FramePos> m_usedSeekOnLoadPosition;
 
+    friend class ReadAheadManagerTest;
     QList<HotcueControl*> m_hotcueControls;
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+    std::atomic<std::uint64_t> m_triggerRevision{0};
+    struct ReadTriggerDecision {
+        HotcueControl* pControl = nullptr;
+        mixxx::audio::FramePos position;
+        mixxx::audio::FramePos endPosition;
+        mixxx::audio::FramePos trigger;
+        mixxx::audio::FramePos target;
+        std::uint64_t revision = 0;
+        bool reverse = false;
+    };
+    // Only nextTrigger/commitTrigger on the callback access this decision.
+    // Raw controls are constructor-owned; this does not retain Cue ownership.
+    ReadTriggerDecision m_pendingReadTrigger;
 
     ControlObject* m_pTrackSamples;
     std::unique_ptr<ControlObject> m_pCuePoint;

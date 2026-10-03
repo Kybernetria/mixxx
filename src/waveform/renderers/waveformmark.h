@@ -158,7 +158,8 @@ class WaveformMark {
                 HotcueControl::Status::Active;
     }
     bool isShowUntilNext() const {
-        return m_showUntilNext;
+        return m_showUntilNext ||
+                (m_pCue && m_pCue->getType() == mixxx::CueType::Memory);
     }
 
     template<typename Receiver, typename Slot>

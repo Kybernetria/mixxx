@@ -79,6 +79,7 @@ EngineBuffer::EngineBuffer(const QString& group,
           m_pitch_old(0),
           m_baserate_old(0),
           m_rate_old(0.),
+          m_naturalRateOld(0.),
           m_trackEndPositionOld(mixxx::audio::kInvalidFramePos),
           m_samplesSinceLastIndicatorUpdate(0),
           m_slipPos(mixxx::audio::kStartFramePos),
@@ -368,6 +369,9 @@ void EngineBuffer::enableIndependentPitchTempoScaling(bool bEnable,
         }
         m_pScale = keylock_scale;
         m_pScale->clear();
+        // Crossfade capture may be skipped while the old scaler has a stale
+        // format or already supplied this callback's fade. Re-anchor anyway.
+        m_pReadAheadManager->notifySeek(m_playPos.toSamplePos(m_channelCount));
         m_bScalerChanged = true;
     } else if (!bEnable && m_pScale != vinyl_scale) {
         if (m_speed_old != 0.0) {
@@ -377,6 +381,7 @@ void EngineBuffer::enableIndependentPitchTempoScaling(bool bEnable,
         }
         m_pScale = vinyl_scale;
         m_pScale->clear();
+        m_pReadAheadManager->notifySeek(m_playPos.toSamplePos(m_channelCount));
         m_bScalerChanged = true;
     }
 }
@@ -472,11 +477,15 @@ void EngineBuffer::readToCrossfadeBuffer(const std::size_t bufferSize) {
     if (!m_bCrossfadeReady) {
         // Read buffer, as if there where no parameter change
         // (Must be called only once per callback)
-        m_pScale->scaleBuffer(m_pCrossfadeBuffer, bufferSize);
+        if (m_pScale == m_pScaleSignalsmith) {
+            m_pScaleSignalsmith->scaleBufferForCrossfade(m_pCrossfadeBuffer, bufferSize);
+        } else {
+            m_pScale->scaleBuffer(m_pCrossfadeBuffer, bufferSize);
+        }
         // Restore the original position that was lost due to scaleBuffer() above
         m_pReadAheadManager->notifySeek(m_playPos.toSamplePos(m_channelCount));
         m_bCrossfadeReady = true;
-     }
+    }
 }
 
 // WARNING: This method is not thread safe and must not be called from outside
@@ -489,13 +498,13 @@ void EngineBuffer::setNewPlaypos(mixxx::audio::FramePos position) {
     m_playPos = position;
 
     if (m_rate_old != 0.0) {
-        // Before seeking, read extra buffer for crossfading
-        // this also sets m_pReadAheadManager to newpos
+        // Before seeking, read extra buffer for crossfading.
         readToCrossfadeBuffer(m_lastBufferSize);
-    } else {
-        m_pReadAheadManager->notifySeek(m_playPos.toSamplePos(m_channelCount));
     }
     m_pScale->clear();
+    // This accepted seek is an unconditional read-cursor re-anchor, even if
+    // the old fade was already captured or its output format was stale.
+    m_pReadAheadManager->notifySeek(m_playPos.toSamplePos(m_channelCount));
 
     // Ensures that the playpos slider gets updated in next process call
     m_samplesSinceLastIndicatorUpdate = 1000000;
@@ -590,6 +599,7 @@ void EngineBuffer::slotTrackLoaded(TrackPointer pTrack,
     m_bSlipEnabledProcessing = false;
     m_slipPos = mixxx::audio::kStartFramePos;
     m_dSlipRate = 0;
+    m_naturalRateOld = 0;
     m_slipModeState = SlipModeState::Disabled;
 
     m_pReplayGain->set(pTrack->getReplayGain().getRatio());
@@ -1123,6 +1133,11 @@ void EngineBuffer::processTrackLocked(
     }
 
     m_rate_old = rate;
+    // Ordinary transport retains scaler clamping; scratch motion must not
+    // replace the counterfactual rate captured when slip is enabled.
+    m_naturalRateOld = is_scratching
+            ? baseSampleRate * m_pRateControl->naturalPlaybackSpeed()
+            : rate;
 
     // If the buffer is not paused, then scale the audio.
     if (!bCurBufferPaused) {
@@ -1198,6 +1213,7 @@ void EngineBuffer::processTrackLocked(
     // to set the sync'ed playposition right away and fill the wrap-around buffer
     // with correct samples from the sync'ed loop in / track start position?
     if (m_pRepeat->toBool() && m_quantize.toBool() &&
+            m_renderedIndicatorSpeed != 0 &&
             (m_playPos > playpos_old) == backwards) {
         // TODO() The resulting seek is processed in the following callback
         // That is to late
@@ -1262,6 +1278,7 @@ void EngineBuffer::process(CSAMPLE* pOutput, const std::size_t bufferSize) {
         SampleUtil::clear(pOutput, bufferSize);
 
         m_rate_old = 0;
+        m_naturalRateOld = 0;
         m_speed_old = 0;
         m_actual_speed = 0;
         m_renderedIndicatorSpeed = 0;
@@ -1288,11 +1305,14 @@ void EngineBuffer::processSlip(std::size_t bufferSize) {
         m_bSlipEnabledProcessing = enabled;
         if (enabled) {
             m_slipPos = m_playPos;
-            m_dSlipRate = m_rate_old;
+            m_dSlipRate = m_naturalRateOld;
         } else {
             // If m_slipQuitAndAdopt is 1 we've already quit slip mode
-            // but we don't seek in that case.
-            if (m_slipQuitAndAdopt.fetchAndStoreAcquire(0) == 0) {
+            // but we don't seek in that case. An uninterrupted fractional
+            // position must not restart stretch preparation just for rounding.
+            if (m_slipQuitAndAdopt.fetchAndStoreAcquire(0) == 0 &&
+                    m_slipPos.toNearestFrameBoundary() !=
+                            m_playPos.toNearestFrameBoundary()) {
                 // TODO(owen) assuming that looping will get canceled properly
                 seekExact(m_slipPos.toNearestFrameBoundary());
             }
