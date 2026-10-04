@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <optional>
+
 #include <QScopedPointer>
 #include <QtDebug>
 
@@ -37,11 +39,16 @@ class StubReader : public CachingReader {
             bool reverse,
             CSAMPLE* buffer,
             mixxx::audio::ChannelCount channelCount) override {
-        Q_UNUSED(startSample);
-        Q_UNUSED(reverse);
-        Q_UNUSED(channelCount);
         ++readCount;
         if (miss || readCount == failOnRead) {
+            return CachingReader::ReadResult::UNAVAILABLE;
+        }
+        const SINT firstFrame = startSample / channelCount -
+                (reverse ? numSamples / channelCount : 0);
+        if (missingChunk && numSamples > 0 &&
+                firstFrame < (*missingChunk + 1) * CachingReaderChunk::kFrames &&
+                firstFrame + numSamples / channelCount >
+                        *missingChunk * CachingReaderChunk::kFrames) {
             return CachingReader::ReadResult::UNAVAILABLE;
         }
         for (SINT i = 0; i < numSamples; ++i) {
@@ -52,6 +59,7 @@ class StubReader : public CachingReader {
     bool miss = false;
     int readCount = 0;
     int failOnRead = -1;
+    std::optional<SINT> missingChunk;
 };
 
 class StubLoopControl : public LoopingControl {
@@ -750,6 +758,73 @@ TEST_F(ReadAheadManagerTest, StretchCrossfadeMissCanRetryWithoutCommittingRead) 
     for (SINT i = 0; i < retry.samplesRead; ++i) {
         EXPECT_FLOAT_EQ(referenceBuffer[i], m_pBuffer[i]);
     }
+}
+
+TEST_F(ReadAheadManagerTest, CrossfadeCacheMissRequestsMissingRangeBeforeRetry) {
+    for (const int channels : {2, 8}) {
+        for (const bool reverse : {false, true}) {
+            SCOPED_TRACE(channels);
+            SCOPED_TRACE(reverse);
+            const auto channelCount = mixxx::audio::ChannelCount(channels);
+            const SINT trigger = reverse
+                    ? 10 * CachingReaderChunk::kFrames - 128
+                    : 20 * CachingReaderChunk::kFrames + 128;
+            const SINT target = (reverse ? 20 : 10) * CachingReaderChunk::kFrames;
+            const SINT position = trigger + (reverse ? 64 : -64);
+            const SINT prefix = target + (reverse ? 0 : -64);
+            m_pLoopControl->setFrameInfo(mixxx::audio::FramePos(position),
+                    mixxx::audio::FramePos(1000000),
+                    mixxx::audio::SampleRate(44100));
+            m_pReadAheadManager->notifySeek(position * channels);
+            m_pLoopControl->pushValues(trigger * 2, target * 2);
+            m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+            m_pReader->missingChunk = prefix / CachingReaderChunk::kFrames;
+
+            const double rate = reverse ? -1 : 1;
+            const auto missing = m_pReadAheadManager->getNextSamplesForStretch(
+                    rate, m_pBuffer, 64 * channels, channelCount);
+            ASSERT_TRUE(missing.unavailable);
+            EXPECT_EQ(position * channels, m_pReadAheadManager->getPlaypos());
+
+            HintVector hints;
+            m_pReadAheadManager->hintReader(rate, &hints, channelCount);
+            ASSERT_GE(hints.size(), 2);
+            EXPECT_EQ(prefix, hints[0].frame);
+            EXPECT_EQ(64, hints[0].frameCount);
+            EXPECT_EQ(Hint::Type::CurrentPosition, hints[0].type);
+            for (const auto& hint : hints) {
+                if (hint.frame <= prefix && hint.frame + hint.frameCount >= prefix + 64) {
+                    m_pReader->missingChunk.reset();
+                }
+            }
+            const auto retry = m_pReadAheadManager->getNextSamplesForStretch(
+                    rate, m_pBuffer, 64 * channels, channelCount);
+            ASSERT_FALSE(retry.unavailable);
+            EXPECT_EQ(64 * channels, retry.samplesRead);
+            EXPECT_EQ(target * channels, m_pReadAheadManager->getPlaypos());
+            hints.clear();
+            m_pReadAheadManager->hintReader(rate, &hints, channelCount);
+            EXPECT_EQ(1, hints.size());
+        }
+    }
+}
+
+TEST_F(ReadAheadManagerTest, SeekCancelsPendingCrossfadeHint) {
+    m_pReadAheadManager->notifySeek(0);
+    m_pLoopControl->pushValues(8, 100);
+    m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+    m_pReader->failOnRead = 2;
+    ASSERT_TRUE(m_pReadAheadManager
+                        ->getNextSamplesForStretch(1,
+                                m_pBuffer,
+                                16,
+                                mixxx::audio::ChannelCount::stereo())
+                        .unavailable);
+    m_pReadAheadManager->notifySeek(200);
+    HintVector hints;
+    m_pReadAheadManager->hintReader(1, &hints, mixxx::audio::ChannelCount::stereo());
+    ASSERT_EQ(1, hints.size());
+    EXPECT_EQ(100, hints[0].frame);
 }
 
 TEST_F(ReadAheadManagerTest, ReadLogCapacityGuardsZeroLengthEntrySaturationAndRecovers) {

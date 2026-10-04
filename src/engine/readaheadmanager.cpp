@@ -80,6 +80,7 @@ SINT ReadAheadManager::readNextSamples(double dRate,
         bool suspendOnMiss,
         bool* unavailable) {
     *unavailable = false;
+    m_hasPendingReadHint = false;
 
     // Refuse before querying stateful controls: a full bounded log cannot
     // commit this read, so trigger decisions must remain available for retry.
@@ -367,6 +368,13 @@ SINT ReadAheadManager::readNextSamples(double dRate,
                     channelCount);
             if (readResult == CachingReader::ReadResult::UNAVAILABLE) {
                 if (suspendOnMiss) {
+                    const SINT readStart = seek_read_position +
+                            (in_reverse ? crossFadeStart : -crossFadeStart);
+                    m_pendingReadHint = {
+                            (readStart - (in_reverse ? crossFadeSamples : 0)) / channelCount,
+                            crossFadeSamples / channelCount,
+                            Hint::Type::CurrentPosition};
+                    m_hasPendingReadHint = true;
                     m_currentPosition = originalPosition;
                     m_readLogStart = originalLogStart;
                     m_readLogSize = originalLogSize;
@@ -445,11 +453,15 @@ void ReadAheadManager::notifySeek(double seekPosition) {
     m_readLogStart = 0;
     m_readLogSize = 0;
     m_pendingTriggerPlan.active = false;
+    m_hasPendingReadHint = false;
 }
 
 void ReadAheadManager::hintReader(double dRate,
         gsl::not_null<HintVector*> pHintList,
         mixxx::audio::ChannelCount channelCount) {
+    if (m_hasPendingReadHint) {
+        pHintList->append(m_pendingReadHint);
+    }
     bool in_reverse = dRate < 0;
     Hint current_position;
 

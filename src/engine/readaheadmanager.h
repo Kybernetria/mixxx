@@ -192,6 +192,8 @@ class ReadAheadManager {
     std::size_t m_readLogStart = 0;
     std::size_t m_readLogSize = 0;
     PendingTriggerPlan m_pendingTriggerPlan;
+    Hint m_pendingReadHint{};
+    bool m_hasPendingReadHint{false};
     double m_currentPosition; // In absolute samples
     CachingReader* m_pReader;
     CSAMPLE* m_pCrossFadeBuffer;
