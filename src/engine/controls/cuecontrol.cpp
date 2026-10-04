@@ -161,8 +161,13 @@ mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
     VERIFY_OR_DEBUG_ASSERT(pTargetPosition) {
         return mixxx::audio::kInvalidFramePos;
     }
-    const auto revision = triggerRevision();
     *pTargetPosition = mixxx::audio::kInvalidFramePos;
+    const auto revision = triggerRevision();
+    const mixxx::Beats* pBeats = nullptr;
+    if (!acquireTriggerBeats(&pBeats) || revision != triggerRevision()) {
+        m_pTriggerBeatsHazard.store(nullptr);
+        return mixxx::audio::kInvalidFramePos;
+    }
     mixxx::audio::FramePos triggerPosition = mixxx::audio::kInvalidFramePos;
     HotcueControl* pNextJump = nullptr;
     mixxx::audio::FramePos selectedPosition;
@@ -181,8 +186,8 @@ mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
             // Saved jumps store the position to jump from as their end position
             if (endPosition >= currentPosition &&
                     (!triggerPosition.isValid() || endPosition < triggerPosition)) {
-                triggerPosition = quantizeCuePoint(endPosition);
-                *pTargetPosition = quantizeCuePoint(position);
+                triggerPosition = quantizeCuePoint(endPosition, pBeats);
+                *pTargetPosition = quantizeCuePoint(position, pBeats);
                 selected = true;
             }
         } else {
@@ -190,8 +195,8 @@ mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
             // position, but here we want to take the jump backward
             if (position <= currentPosition &&
                     (!triggerPosition.isValid() || position > triggerPosition)) {
-                triggerPosition = quantizeCuePoint(position);
-                *pTargetPosition = quantizeCuePoint(endPosition);
+                triggerPosition = quantizeCuePoint(position, pBeats);
+                *pTargetPosition = quantizeCuePoint(endPosition, pBeats);
                 selected = true;
             }
         }
@@ -202,6 +207,7 @@ mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
         }
     }
 
+    m_pTriggerBeatsHazard.store(nullptr);
     if (!commitState && pNextJump) {
         m_pendingReadTrigger = {pNextJump,
                 selectedPosition,
@@ -623,6 +629,7 @@ void CueControl::detachCue(HotcueControl* pControl) {
 // command intended for the old track that might be performed instead.
 void CueControl::trackLoaded(TrackPointer pNewTrack) {
     auto lock = lockMutex(&m_trackMutex);
+    publishTriggerBeats(pNewTrack ? pNewTrack->getBeats() : mixxx::BeatsPointer{});
     if (m_pLoadedTrack) {
         disconnect(m_pLoadedTrack.get(), nullptr, this, nullptr);
 
@@ -950,8 +957,38 @@ void CueControl::trackCuesUpdated() {
 
 void CueControl::trackBeatsUpdated(mixxx::BeatsPointer pBeats) {
     Q_UNUSED(pBeats);
-    m_triggerRevision.fetch_add(1, std::memory_order_relaxed);
+    {
+        const auto locked = lockMutex(&m_trackMutex);
+        publishTriggerBeats(m_pLoadedTrack ? m_pLoadedTrack->getBeats() : mixxx::BeatsPointer{});
+        m_triggerRevision.fetch_add(1, std::memory_order_relaxed);
+    }
     loadCuesFromTrack();
+}
+
+void CueControl::publishTriggerBeats(mixxx::BeatsPointer pBeats) {
+    auto pOldBeats = std::move(m_pTriggerBeatsOwner);
+    m_pTriggerBeatsOwner = std::move(pBeats);
+    m_pTriggerBeats.store(m_pTriggerBeatsOwner.get());
+    const auto* pHazard = m_pTriggerBeatsHazard.load();
+    if (m_pRetiredTriggerBeats.get() != pHazard) {
+        m_pRetiredTriggerBeats.reset();
+    }
+    if (pOldBeats && pOldBeats.get() == pHazard) {
+        m_pRetiredTriggerBeats = std::move(pOldBeats);
+    }
+}
+
+bool CueControl::acquireTriggerBeats(const mixxx::Beats** ppBeats) {
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const auto* pBeats = m_pTriggerBeats.load();
+        m_pTriggerBeatsHazard.store(pBeats);
+        if (pBeats == m_pTriggerBeats.load()) {
+            *ppBeats = pBeats;
+            return true;
+        }
+    }
+    m_pTriggerBeatsHazard.store(nullptr);
+    return false;
 }
 
 void CueControl::quantizeChanged(double v) {
@@ -2455,6 +2492,20 @@ mixxx::audio::FramePos CueControl::getQuantizedCurrentPosition() {
 }
 
 mixxx::audio::FramePos CueControl::quantizeCuePoint(mixxx::audio::FramePos position) {
+    if (!position.isValid() || !m_pQuantizeEnabled->toBool()) {
+        return quantizeCuePoint(position, nullptr);
+    }
+    const auto trackEndPosition =
+            mixxx::audio::FramePos::fromEngineSamplePosMaybeInvalid(m_pTrackSamples->get());
+    VERIFY_OR_DEBUG_ASSERT(trackEndPosition.isValid()) {
+        return mixxx::audio::kInvalidFramePos;
+    }
+    const auto pBeats = m_pLoadedTrack ? m_pLoadedTrack->getBeats() : mixxx::BeatsPointer{};
+    return quantizeCuePoint(position, pBeats.get());
+}
+
+mixxx::audio::FramePos CueControl::quantizeCuePoint(
+        mixxx::audio::FramePos position, const mixxx::Beats* pBeats) {
     // Don't quantize unset cues.
     if (!position.isValid()) {
         return mixxx::audio::kInvalidFramePos;
@@ -2481,7 +2532,6 @@ mixxx::audio::FramePos CueControl::quantizeCuePoint(mixxx::audio::FramePos posit
         position = trackEndPosition;
     }
 
-    const mixxx::BeatsPointer pBeats = m_pLoadedTrack->getBeats();
     if (!pBeats) {
         return position;
     }

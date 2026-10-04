@@ -1,4 +1,8 @@
 #include "engine/controls/cuecontrol.h"
+
+#include <thread>
+
+#include "test/callbackallocationcheck.h"
 #include "test/signalpathtest.h"
 
 class CueControlTest : public BaseSignalPathTest {
@@ -64,6 +68,28 @@ class CueControlTest : public BaseSignalPathTest {
         ProcessBuffer();
     }
 
+    CueControl* cueControl() const {
+        return m_pChannel1->getEngineBuffer()->m_pCueControl;
+    }
+
+    HotcueControl* hotcue(int index) const {
+        return cueControl()->m_hotcueControls[index];
+    }
+
+    void publishTriggerBeats(mixxx::BeatsPointer pBeats) {
+        auto* pControl = cueControl();
+        const auto locked = lockMutex(&pControl->m_trackMutex);
+        pControl->publishTriggerBeats(std::move(pBeats));
+    }
+
+    bool acquireTriggerBeats(const mixxx::Beats** ppBeats) {
+        return cueControl()->acquireTriggerBeats(ppBeats);
+    }
+
+    void releaseTriggerBeats() {
+        cueControl()->m_pTriggerBeatsHazard.store(nullptr);
+    }
+
     std::unique_ptr<ControlProxy> m_pQuantizeEnabled;
     std::unique_ptr<ControlProxy> m_pCuePoint;
     std::unique_ptr<ControlProxy> m_pIntroStartPosition;
@@ -83,6 +109,106 @@ class CueControlTest : public BaseSignalPathTest {
     std::unique_ptr<ControlProxy> m_pOutroEndSet;
     std::unique_ptr<ControlProxy> m_pOutroEndClear;
 };
+
+TEST_F(CueControlTest, SavedJumpUsesPublishedBeatGridWithoutCallbackAllocation) {
+    using mixxx::audio::FramePos;
+    const auto pTrack = createTestTrack();
+    ASSERT_TRUE(pTrack->trySetBpm(120.0));
+    const double bpm = pTrack->getBpm();
+    const double beatLengthFrames = 60.0 * pTrack->getSampleRate() / bpm;
+    pTrack->createAndAddCue(mixxx::CueType::Jump,
+            0,
+            FramePos(1.2 * beatLengthFrames),
+            FramePos(3.2 * beatLengthFrames));
+    loadTrack(pTrack);
+    m_pQuantizeEnabled->set(1);
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+
+    FramePos target;
+    mixxxtest::callbackAllocations = 0;
+    mixxxtest::callbackDeallocations = 0;
+    const bool previousCounting = mixxxtest::countCallbackAllocations;
+    mixxxtest::countCallbackAllocations = true;
+    const auto trigger = cueControl()->nextTrigger(false, FramePos(0), &target, 0, false);
+    mixxxtest::countCallbackAllocations = previousCounting;
+    EXPECT_FRAMEPOS_EQ(FramePos(3.0 * beatLengthFrames), trigger);
+    EXPECT_FRAMEPOS_EQ(FramePos(beatLengthFrames), target);
+    EXPECT_EQ(0u, mixxxtest::callbackAllocations);
+    EXPECT_EQ(0u, mixxxtest::callbackDeallocations);
+
+    const auto pPreviousBeats = pTrack->getBeats();
+    ASSERT_TRUE(pTrack->trySetBeats(mixxx::Beats::fromConstTempo(
+            pTrack->getSampleRate(), FramePos(1000), mixxx::Bpm(120.0))));
+    cueControl()->trackBeatsUpdated(pPreviousBeats);
+    const auto updatedTrigger =
+            cueControl()->nextTrigger(false, FramePos(0), &target, 0, false);
+    EXPECT_FRAMEPOS_EQ(FramePos(1000 + 3.0 * beatLengthFrames), updatedTrigger);
+    EXPECT_FRAMEPOS_EQ(FramePos(1000 + beatLengthFrames), target);
+
+    const auto reverseTrigger = cueControl()->nextTrigger(
+            true, FramePos(4.0 * beatLengthFrames), &target, 0, false);
+    EXPECT_FRAMEPOS_EQ(FramePos(1000 + beatLengthFrames), reverseTrigger);
+    EXPECT_FRAMEPOS_EQ(FramePos(1000 + 3.0 * beatLengthFrames), target);
+}
+
+TEST_F(CueControlTest, PublishedBeatGridLivesUntilCallbackReleasesIt) {
+    using mixxx::audio::FramePos;
+    auto pFirstBeats = mixxx::Beats::fromConstTempo(
+            mixxx::audio::SampleRate(44100), FramePos(0), mixxx::Bpm(120.0));
+    const std::weak_ptr<const mixxx::Beats> firstBeatsLifetime = pFirstBeats;
+    publishTriggerBeats(std::move(pFirstBeats));
+    const mixxx::Beats* pPinnedBeats = nullptr;
+    ASSERT_TRUE(acquireTriggerBeats(&pPinnedBeats));
+    ASSERT_NE(nullptr, pPinnedBeats);
+
+    for (int i = 1; i <= 32; ++i) {
+        publishTriggerBeats(mixxx::Beats::fromConstTempo(
+                mixxx::audio::SampleRate(44100), FramePos(i), mixxx::Bpm(120.0)));
+        ASSERT_FALSE(firstBeatsLifetime.expired());
+        EXPECT_FRAMEPOS_EQ(FramePos(0), pPinnedBeats->findClosestBeat(FramePos(0)));
+    }
+    releaseTriggerBeats();
+    publishTriggerBeats({});
+    EXPECT_TRUE(firstBeatsLifetime.expired());
+    ASSERT_TRUE(acquireTriggerBeats(&pPinnedBeats));
+    EXPECT_EQ(nullptr, pPinnedBeats);
+    releaseTriggerBeats();
+}
+
+TEST_F(CueControlTest, ConcurrentBeatPublicationPreservesImmutableCallbackSnapshots) {
+    using mixxx::audio::FramePos;
+    publishTriggerBeats(mixxx::Beats::fromConstTempo(
+            mixxx::audio::SampleRate(44100), FramePos(0), mixxx::Bpm(120.0)));
+    std::atomic<bool> finished{false};
+    std::atomic<unsigned> reads{0};
+    std::atomic<bool> changedWhilePinned{false};
+    std::thread callback([&] {
+        do {
+            const mixxx::Beats* pBeats = nullptr;
+            if (acquireTriggerBeats(&pBeats) && pBeats) {
+                const auto position = pBeats->findClosestBeat(FramePos(0));
+                std::this_thread::yield();
+                if (position != pBeats->findClosestBeat(FramePos(0))) {
+                    changedWhilePinned.store(true);
+                }
+                ++reads;
+            }
+            releaseTriggerBeats();
+        } while (!finished.load());
+    });
+    while (reads.load() == 0) {
+        std::this_thread::yield();
+    }
+    for (int i = 1; i <= 2000; ++i) {
+        publishTriggerBeats(mixxx::Beats::fromConstTempo(
+                mixxx::audio::SampleRate(44100), FramePos(i), mixxx::Bpm(120.0)));
+    }
+    finished.store(true);
+    callback.join();
+    EXPECT_FALSE(changedWhilePinned.load());
+    EXPECT_GT(reads.load(), 0u);
+    publishTriggerBeats({});
+}
 
 TEST_F(CueControlTest, LoadUnloadTrack) {
     constexpr auto kCuePosition = mixxx::audio::FramePos(100);

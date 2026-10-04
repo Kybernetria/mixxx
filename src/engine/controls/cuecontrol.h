@@ -313,6 +313,10 @@ class CueControl : public EngineControl {
     void setCurrentSavedLoopControlAndActivate(HotcueControl* pControl);
     void loadCuesFromTrack();
     mixxx::audio::FramePos quantizeCuePoint(mixxx::audio::FramePos position);
+    mixxx::audio::FramePos quantizeCuePoint(
+            mixxx::audio::FramePos position, const mixxx::Beats* pBeats);
+    void publishTriggerBeats(mixxx::BeatsPointer pBeats);
+    bool acquireTriggerBeats(const mixxx::Beats** ppBeats);
     mixxx::audio::FramePos getQuantizedCurrentPosition();
     TrackAt getTrackAt() const;
     void seekOnLoad(mixxx::audio::FramePos seekOnLoadPosition);
@@ -340,6 +344,7 @@ class CueControl : public EngineControl {
     ControlValueAtomic<mixxx::audio::FramePos> m_usedSeekOnLoadPosition;
 
     friend class ReadAheadManagerTest;
+    friend class CueControlTest;
     QList<HotcueControl*> m_hotcueControls;
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
     std::atomic<std::uint64_t> m_triggerRevision{0};
@@ -355,6 +360,17 @@ class CueControl : public EngineControl {
     // Only nextTrigger/commitTrigger on the callback access this decision.
     // Raw controls are constructor-owned; this does not retain Cue ownership.
     ReadTriggerDecision m_pendingReadTrigger;
+    // AI-generated explanation.
+    // One audio reader pins immutable Beats without copying shared ownership.
+    // Publishers hold m_trackMutex and reclaim only unpinned ownership. Sequentially
+    // consistent pointer operations order publication, pinning, and reclamation.
+    // The audio reader must stop before CueControl is destroyed.
+    // End of AI-generated explanation.
+    static_assert(std::atomic<const mixxx::Beats*>::is_always_lock_free);
+    std::atomic<const mixxx::Beats*> m_pTriggerBeats{nullptr};
+    std::atomic<const mixxx::Beats*> m_pTriggerBeatsHazard{nullptr};
+    mixxx::BeatsPointer m_pTriggerBeatsOwner;
+    mixxx::BeatsPointer m_pRetiredTriggerBeats;
 
     ControlObject* m_pTrackSamples;
     std::unique_ptr<ControlObject> m_pCuePoint;
