@@ -31,7 +31,8 @@ class StretchReader final : public ReadAheadManager {
                 output[frame * channels + ch] = impulse
                         ? (sourceFrame == impulseFrame ? 1.0f : 0.0f)
                         : static_cast<float>(std::sin(sourceFrame *
-                                  (ch + 1) * 2 * M_PI * 440 / sourceSampleRate));
+                                  (identicalChannels ? 1 : ch + 1) *
+                                  2 * M_PI * 440 / sourceSampleRate));
             }
         }
         position += (rate < 0 ? -frames : frames);
@@ -43,6 +44,7 @@ class StretchReader final : public ReadAheadManager {
     int maxFrames = 8192;
     bool miss = false;
     bool impulse = false;
+    bool identicalChannels = false;
     int impulseFrame = 10000;
     int sourceSampleRate = 44100;
     double position = 0;
@@ -158,6 +160,28 @@ TEST_F(EngineBufferScaleSignalsmithTest, ExactSeekCancelsLiveTimelineDebt) {
     EXPECT_EQ(256, scaleEventually(output.data(), output.size()));
     EXPECT_EQ(0, scaler.discardedFrames());
     EXPECT_FALSE(scaler.isRecoveringLiveTimeline());
+}
+
+TEST_F(EngineBufferScaleSignalsmithTest, ResumeFadeKeepsIdenticalStemChannelsEqual) {
+    for (const int channels : {2, 8}) {
+        for (const int frames : {1, 64, 256}) {
+            SCOPED_TRACE(channels);
+            SCOPED_TRACE(frames);
+            ready(channels);
+            reader.identicalChannels = true;
+            reader.position = 20000;
+            std::vector<float> output(frames * channels);
+            ASSERT_EQ(frames, scaleEventually(output.data(), output.size()));
+            double energy = 0;
+            for (int frame = 0; frame < frames; ++frame) {
+                energy += output[frame * channels] * output[frame * channels];
+                for (int ch = 1; ch < channels; ++ch) {
+                    EXPECT_NEAR(output[frame * channels], output[frame * channels + ch], 1e-6);
+                }
+            }
+            EXPECT_GT(energy, 0.001);
+        }
+    }
 }
 
 TEST_F(EngineBufferScaleSignalsmithTest, HeldWorkerDoesNotReadOrAllocateOnCallbackAndCancels) {

@@ -391,10 +391,13 @@ double EngineBufferScaleSignalsmith::scaleBufferInternal(
                 }
             }
             if (state.resuming) {
-                SampleUtil::applyRampingGain(output + written * channels,
-                        CSAMPLE_GAIN_ZERO,
-                        CSAMPLE_GAIN_ONE,
-                        count * channels);
+                const CSAMPLE_GAIN gainDelta = CSAMPLE_GAIN_ONE / CSAMPLE_GAIN(count);
+                for (int frame = 0; frame < count; ++frame) {
+                    const CSAMPLE_GAIN gain = gainDelta + gainDelta * frame;
+                    for (int ch = 0; ch < channels; ++ch) {
+                        output[(written + frame) * channels + ch] *= gain;
+                    }
+                }
                 state.resuming = false;
             }
             state.outputOffset += count;
