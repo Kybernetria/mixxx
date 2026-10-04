@@ -2977,6 +2977,7 @@ if(BUILD_TESTING)
     #src/test/effectchainslottest.cpp
     src/test/enginebufferscalelineartest.cpp
     src/test/enginebufferscalesignalsmithtest.cpp
+    src/test/engineworkerscheduler_test.cpp
     src/test/callbackallocationcheck.cpp
     src/test/boundedatomicvalue_test.cpp
     src/test/enginebuffertest.cpp
