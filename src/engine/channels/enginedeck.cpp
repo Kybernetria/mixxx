@@ -12,6 +12,7 @@
 #include "moc_enginedeck.cpp"
 #include "track/track.h"
 #include "util/assert.h"
+#include "util/defs.h"
 #include "util/sample.h"
 
 EngineDeck::EngineDeck(
@@ -26,6 +27,9 @@ EngineDeck::EngineDeck(
                   primaryDeck),
           m_pConfig(pConfig),
 #ifdef __STEM__
+          m_stemBuffer(primaryDeck
+                          ? kMaxEngineFrames * mixxx::audio::ChannelCount::stem()
+                          : 0),
           m_stemClonedState(false),
 #endif
           m_pInputConfigured(new ControlObject(ConfigKey(getGroup(), "input_configured"))),
@@ -138,8 +142,9 @@ void EngineDeck::processStem(CSAMPLE* pOut, const std::size_t bufferSize) {
     unsigned int stemCount = chCount / mixxx::kEngineChannelOutputCount;
     SINT numFrames = bufferSize / mixxx::kEngineChannelOutputCount;
     std::size_t allChannelBufferSize = bufferSize * stemCount;
-    if (m_stemBuffer.size() < static_cast<SINT>(allChannelBufferSize)) {
-        m_stemBuffer = mixxx::SampleBuffer(allChannelBufferSize);
+    VERIFY_OR_DEBUG_ASSERT(m_stemBuffer.size() >= static_cast<SINT>(allChannelBufferSize)) {
+        SampleUtil::clear(pOut, bufferSize);
+        return;
     }
     m_pBuffer->process(m_stemBuffer.data(), allChannelBufferSize);
 
