@@ -77,6 +77,8 @@ class EngineBuffer : public EngineObject {
         SEEK_CLONE = 1 << 3,
         SEEK_LIVE = 1 << 4,
         SEEK_BEATJUMP = SEEK_EXACT | SEEK_LIVE,
+        SEEK_SLIP = 1 << 5,
+        SEEK_SLIP_RESTORE = SEEK_EXACT | SEEK_SLIP,
     };
     Q_DECLARE_FLAGS(SeekRequests, SeekRequest);
 
@@ -466,6 +468,7 @@ class EngineBuffer : public EngineObject {
     ControlValueAtomic<QueuedSeek> m_queuedSeek;
     bool m_previousBufferSeek = false;
     bool m_liveTimeline = false;
+    bool m_slipTimeline = false;
 
     QAtomicInt m_slipQuitAndAdopt;
     /// Indicates that no seek is queued

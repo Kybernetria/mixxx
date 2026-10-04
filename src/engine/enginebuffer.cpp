@@ -1030,9 +1030,11 @@ void EngineBuffer::processTrackLocked(
         useIndependentPitchAndTempoScaling = false;
         pitchRatio = speed;
     }
-    if (is_scratching || is_reverse || paused || !m_quantize.toBool() ||
-            m_pSyncControl->getSyncMode() != SyncMode::Follower) {
+    if (is_scratching || paused ||
+            (!m_slipTimeline && (is_reverse || !m_quantize.toBool() ||
+                    m_pSyncControl->getSyncMode() != SyncMode::Follower))) {
         m_liveTimeline = false;
+        m_slipTimeline = false;
     }
 
     if (speed != 0.0 || is_scratching) {
@@ -1178,6 +1180,7 @@ void EngineBuffer::processTrackLocked(
         if (m_pScale == m_pScaleSignalsmith) {
             m_liveTimeline = m_pScaleSignalsmith->isRecoveringLiveTimeline();
         }
+        m_slipTimeline &= m_liveTimeline;
         // Lookahead gathered for asynchronous preroll is not audible transport.
         // Use delivered source frames, not position deltas (which include loops).
         m_renderedIndicatorSpeed = baseSampleRate > 0
@@ -1353,7 +1356,7 @@ void EngineBuffer::processSlip(std::size_t bufferSize) {
                     m_slipPos.toNearestFrameBoundary() !=
                             m_playPos.toNearestFrameBoundary()) {
                 // TODO(owen) assuming that looping will get canceled properly
-                seekExact(m_slipPos.toNearestFrameBoundary());
+                doSeekPlayPos(m_slipPos.toNearestFrameBoundary(), SEEK_SLIP_RESTORE);
             }
             m_slipPos = mixxx::audio::kStartFramePos;
         }
@@ -1431,9 +1434,12 @@ void EngineBuffer::processSeek(bool paused) {
     mixxx::audio::FramePos position = queuedSeek.position;
     bool liveTimeline = seekType.testFlag(SEEK_LIVE);
     seekType.setFlag(SEEK_LIVE, false);
+    const bool slipTimeline = seekType.testFlag(SEEK_SLIP);
+    seekType.setFlag(SEEK_SLIP, false);
     const int phaseRequest = m_iSeekPhaseQueued.fetchAndStoreRelease(0);
     const bool livePhase = phaseRequest & SEEK_LIVE;
-    const bool acceptLivePhase = queuedSeek.seekType != SEEK_EXACT && !paused &&
+    const bool acceptLivePhase = queuedSeek.seekType != SEEK_EXACT &&
+            queuedSeek.seekType != SEEK_SLIP_RESTORE && !paused &&
             m_quantize.toBool() && m_pSyncControl->getSyncMode() == SyncMode::Follower &&
             !m_pRateControl->scratchRequested();
     if (phaseRequest && (!livePhase || acceptLivePhase)) {
@@ -1476,8 +1482,9 @@ void EngineBuffer::processSeek(bool paused) {
     VERIFY_OR_DEBUG_ASSERT(position.isValid()) {
         return;
     }
-    m_liveTimeline = liveTimeline && !paused && m_quantize.toBool() &&
-            m_pSyncControl->getSyncMode() == SyncMode::Follower;
+    m_slipTimeline = slipTimeline && !paused;
+    m_liveTimeline = m_slipTimeline || (liveTimeline && !paused && m_quantize.toBool() &&
+            m_pSyncControl->getSyncMode() == SyncMode::Follower);
 
     // Don't allow the playposition to go past the end.
     position = std::min<mixxx::audio::FramePos>(position, m_trackEndPositionOld);

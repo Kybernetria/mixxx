@@ -199,6 +199,80 @@ class SignalsmithMemoryIntegrationTest : public SignalPathTest {
                 1e-9);
         engine()->setKeylockPreparationPausedForTest(false);
     }
+    void verifySlipRecoveryOnMovingTimeline(bool reverse, bool changeTempo) {
+        ASSERT_TRUE(startSteadyPlayback());
+        const double direction = reverse ? -1.0 : 1.0;
+        if (reverse) {
+            engine()->seekExact(FramePos(200000));
+            ControlObject::set(ConfigKey(m_sGroup1, "reverse"), 1);
+            int settled = 0;
+            for (int i = 0; i < 1000 && settled < 8; ++i) {
+                const auto before = engine()->getExactPlayPos();
+                process();
+                const double step = direction * kProcessBufferSize / 2.0 *
+                        engine()->getRateRatio();
+                settled = std::fabs(engine()->getExactPlayPos() - before - step) < 1e-6
+                        ? settled + 1
+                        : 0;
+                QTest::qSleep(1);
+            }
+            ASSERT_EQ(8, settled);
+        }
+        const auto start = engine()->getExactPlayPos();
+        const double slipStep = direction * kProcessBufferSize / 2.0 *
+                engine()->getRateRatio();
+        ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+        process();
+        engine()->setKeylockPreparationPausedForTest(true);
+        engine()->seekExact(FramePos(100000));
+        process();
+        int slipCallbacks = 2;
+        if (changeTempo) {
+            ControlObject::set(ConfigKey(m_sGroup1, "rate"), 0.25);
+            process();
+            ++slipCallbacks;
+        }
+        const auto restorePosition =
+                (start + slipCallbacks * slipStep).toNearestFrameBoundary();
+        ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+        process();
+        int elapsedCallbacks = 1;
+        const double playbackStep = direction * kProcessBufferSize / 2.0 *
+                engine()->getRateRatio();
+        EXPECT_EQ(restorePosition, engine()->getExactPlayPos());
+        EXPECT_TRUE(engine()->isRecoveringLiveTimeline());
+        for (int i = 0; i < 12; ++i) {
+            process();
+            ++elapsedCallbacks;
+            EXPECT_EQ(restorePosition, engine()->getExactPlayPos());
+            EXPECT_TRUE(engine()->isRecoveringLiveTimeline());
+            QTest::qSleep(1);
+        }
+        engine()->setKeylockPreparationPausedForTest(false);
+        const auto visual = VisualPlayPosition::getVisualPlayPosition(m_sGroup1);
+        bool resumed = false;
+        for (int i = 0; i < 1000 && !resumed; ++i) {
+            process();
+            ++elapsedCallbacks;
+            resumed = visual->getEnginePlayRateForTest() * direction > 0;
+            QTest::qSleep(1);
+        }
+        ASSERT_TRUE(resumed);
+        EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
+        EXPECT_NEAR(0,
+                engine()->getExactPlayPos() -
+                        (restorePosition + elapsedCallbacks * playbackStep),
+                1.0);
+        for (int i = 0; i < 8; ++i) {
+            process();
+            ++elapsedCallbacks;
+            EXPECT_NEAR(0,
+                    engine()->getExactPlayPos() -
+                            (restorePosition + elapsedCallbacks * playbackStep),
+                    1.0);
+            QTest::qSleep(1);
+        }
+    }
 };
 
 TEST_F(SignalsmithMemoryIntegrationTest, SyncedBeatJumpResumesOnMovingTimeline) {
@@ -666,6 +740,64 @@ TEST_F(SignalsmithMemoryIntegrationTest, SlipRestoresCounterfactualPositionAfter
     process();
     EXPECT_EQ((start + 3 * step).toNearestFrameBoundary(), engine()->getExactPlayPos());
     EXPECT_EQ(1, ControlObject::get(ConfigKey(m_sGroup1, "play")));
+    engine()->setKeylockPreparationPausedForTest(false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, SlipRestoreResumesOnUnsyncedMovingTimeline) {
+    verifySlipRecoveryOnMovingTimeline(false, false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, ReverseSlipRestoreResumesOnMovingTimeline) {
+    verifySlipRecoveryOnMovingTimeline(true, false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, SlipRestoreRecoveryUsesCurrentTempoAfterCapturedAnchor) {
+    verifySlipRecoveryOnMovingTimeline(false, true);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, ReverseSlipRecoveryUsesCurrentTempoAfterCapturedAnchor) {
+    verifySlipRecoveryOnMovingTimeline(true, true);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, ExactCueCancelsPendingSlipRecovery) {
+    ASSERT_TRUE(startSteadyPlayback());
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+    process();
+    engine()->setKeylockPreparationPausedForTest(true);
+    engine()->seekExact(FramePos(100000));
+    process();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+    process();
+    ASSERT_TRUE(engine()->isRecoveringLiveTimeline());
+    engine()->seekExact(FramePos(5001));
+    for (int i = 0; i < 12; ++i) {
+        process();
+        EXPECT_EQ(FramePos(5001), engine()->getExactPlayPos());
+        EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
+    }
+    engine()->setKeylockPreparationPausedForTest(false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, PausedSlipRestoreKeepsExactAnchorWithoutLiveDebt) {
+    ASSERT_TRUE(startSteadyPlayback());
+    ControlObject::set(ConfigKey(m_sGroup1, "play"), 0);
+    process();
+    const auto anchor = engine()->getExactPlayPos();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+    process();
+    engine()->setKeylockPreparationPausedForTest(true);
+    engine()->seekExact(FramePos(100000));
+    process();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+    process();
+    EXPECT_EQ(anchor.toNearestFrameBoundary(), engine()->getExactPlayPos());
+    EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
+    ControlObject::set(ConfigKey(m_sGroup1, "play"), 1);
+    for (int i = 0; i < 12; ++i) {
+        process();
+        EXPECT_EQ(anchor.toNearestFrameBoundary(), engine()->getExactPlayPos());
+        EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
+    }
     engine()->setKeylockPreparationPausedForTest(false);
 }
 
