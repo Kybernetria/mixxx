@@ -366,6 +366,7 @@ CachingReader::ReadResult CachingReader::read(SINT startSample,
     DEBUG_ASSERT(!remainingFrameIndexRange.empty());
 
     auto result = ReadResult::AVAILABLE;
+    bool cacheMiss = false;
     if (!intersect(remainingFrameIndexRange, m_readableFrameIndexRange).empty()) {
         // Fill the buffer up to the first readable sample with
         // silence. This may happen when the engine is in preroll,
@@ -469,6 +470,7 @@ CachingReader::ReadResult CachingReader::read(SINT startSample,
                     // pending.
                     DEBUG_ASSERT(!pChunk ||
                             (pChunk->getState() == CachingReaderChunkForOwner::READ_PENDING));
+                    cacheMiss = true;
                     Counter("CachingReader::read(): Failed to read chunk on cache miss")++;
                     if (kLogger.traceEnabled()) {
                         kLogger.trace()
@@ -531,7 +533,7 @@ CachingReader::ReadResult CachingReader::read(SINT startSample,
     DEBUG_ASSERT(samplesRemaining >= 0);
     if (samplesRemaining > 0) {
         SampleUtil::clear(buffer, samplesRemaining);
-        result = ReadResult::PARTIALLY_AVAILABLE;
+        result = cacheMiss ? ReadResult::PARTIALLY_UNAVAILABLE : ReadResult::PARTIALLY_AVAILABLE;
     }
     return result;
 }

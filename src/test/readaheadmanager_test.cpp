@@ -40,6 +40,9 @@ class StubReader : public CachingReader {
             CSAMPLE* buffer,
             mixxx::audio::ChannelCount channelCount) override {
         ++readCount;
+        lastReadPosition = startSample;
+        lastReadSampleCount = numSamples;
+        lastReadReverse = reverse;
         if (miss || readCount == failOnRead) {
             return CachingReader::ReadResult::UNAVAILABLE;
         }
@@ -52,13 +55,28 @@ class StubReader : public CachingReader {
             return CachingReader::ReadResult::UNAVAILABLE;
         }
         for (SINT i = 0; i < numSamples; ++i) {
-            buffer[i] = static_cast<CSAMPLE>(startSample + i);
+            const SINT sourceSample = reverse && preserveSourceDirection
+                    ? startSample - channelCount -
+                            (i / channelCount) * channelCount + i % channelCount
+                    : startSample + i;
+            buffer[i] = static_cast<CSAMPLE>(sourceSample);
+        }
+        if (readCount == partialOnRead) {
+            SampleUtil::clear(buffer + numSamples / 2, numSamples - numSamples / 2);
+            return partialCacheMiss ? CachingReader::ReadResult::PARTIALLY_UNAVAILABLE
+                                    : CachingReader::ReadResult::PARTIALLY_AVAILABLE;
         }
         return CachingReader::ReadResult::AVAILABLE;
     }
     bool miss = false;
     int readCount = 0;
     int failOnRead = -1;
+    int partialOnRead = -1;
+    bool partialCacheMiss = true;
+    bool preserveSourceDirection = false;
+    SINT lastReadPosition = 0;
+    SINT lastReadSampleCount = 0;
+    bool lastReadReverse = false;
     std::optional<SINT> missingChunk;
 };
 
@@ -260,6 +278,10 @@ class ReadAheadManagerTest : public MixxxTest {
         return m_pReadAheadManager
                 ->m_readAheadLog[m_pReadAheadManager->m_readLogStart]
                 .hasWrapAround;
+    }
+    void setReaderRange(SINT start, SINT end) {
+        m_pReader->m_readableFrameIndexRange = mixxx::IndexRange::between(start, end);
+        m_pReader->m_state.storeRelease(CachingReader::STATE_TRACK_LOADED);
     }
 };
 
@@ -805,6 +827,181 @@ TEST_F(ReadAheadManagerTest, CrossfadeCacheMissRequestsMissingRangeBeforeRetry) 
             hints.clear();
             m_pReadAheadManager->hintReader(rate, &hints, channelCount);
             EXPECT_EQ(1, hints.size());
+        }
+    }
+}
+
+TEST_F(ReadAheadManagerTest, FractionalWrapPreservesDirectionalOvershoot) {
+    for (const int channels : {2, 8}) {
+        for (const bool reverse : {false, true}) {
+            const auto channelCount = mixxx::audio::ChannelCount(channels);
+            const double position = reverse ? 12 : 8;
+            m_pReadAheadManager->notifySeek(position * channels);
+            m_pLoopControl->pushValues(10.3 * 2, 20.5 * 2);
+            m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+            const double rate = reverse ? -1 : 1;
+            const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+                    rate, m_pBuffer, 8 * channels, channelCount);
+            EXPECT_FALSE(read.unavailable);
+            EXPECT_EQ((reverse ? 2 : 3) * channels, read.samplesRead);
+            EXPECT_NEAR((reverse ? 20.2 : 21.2) * channels,
+                    m_pReadAheadManager->getPlaypos(),
+                    1e-10);
+            EXPECT_NEAR((reverse ? 10 : 11) * channels,
+                    m_pReadAheadManager->getFilePlaypositionFromLog(
+                            position * channels, read.samplesRead),
+                    1e-10);
+            m_pLoopControl->pushValues(10.3 * 2, 20.5 * 2);
+            m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+            const auto next = m_pReadAheadManager->getNextSamplesForStretch(
+                    rate, m_pBuffer, channels, channelCount);
+            EXPECT_FALSE(next.unavailable);
+            EXPECT_EQ(channels, next.samplesRead);
+            EXPECT_NEAR((reverse ? 19.2 : 22.2) * channels,
+                    m_pReadAheadManager->getFilePlaypositionFromLog(
+                            (reverse ? 10 : 11) * channels, next.samplesRead),
+                    1e-10);
+        }
+    }
+}
+
+TEST_F(ReadAheadManagerTest, PartialCacheMissDoesNotCommitStretchInput) {
+    for (const int channels : {2, 8}) {
+        for (const bool reverse : {false, true}) {
+            for (const int partialRead : {1, 2}) {
+                SCOPED_TRACE(channels);
+                SCOPED_TRACE(reverse);
+                SCOPED_TRACE(partialRead);
+                const auto channelCount = mixxx::audio::ChannelCount(channels);
+                const SINT trigger = reverse
+                        ? 10 * CachingReaderChunk::kFrames - 128
+                        : 20 * CachingReaderChunk::kFrames + 128;
+                const SINT target = 15 * CachingReaderChunk::kFrames +
+                        (reverse ? -32 : 32);
+                const SINT position = trigger + (reverse ? 64 : -64);
+                m_pLoopControl->setFrameInfo(mixxx::audio::FramePos(position),
+                        mixxx::audio::FramePos(1000000),
+                        mixxx::audio::SampleRate(44100));
+                m_pReadAheadManager->notifySeek(position * channels);
+                m_pLoopControl->pushValues(trigger * 2, target * 2);
+                m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+                m_pReader->readCount = 0;
+                m_pReader->partialOnRead = partialRead;
+                const double rate = reverse ? -1 : 1;
+                const auto missing = m_pReadAheadManager->getNextSamplesForStretch(
+                        rate, m_pBuffer, 64 * channels, channelCount);
+                ASSERT_TRUE(missing.unavailable);
+                EXPECT_EQ(0, missing.samplesRead);
+                EXPECT_EQ(position * channels, m_pReadAheadManager->getPlaypos());
+                EXPECT_EQ(0u, readLogSize());
+                for (SINT sample = 0; sample < 64 * channels; ++sample) {
+                    EXPECT_EQ(0, m_pBuffer[sample]);
+                }
+                if (partialRead == 2) {
+                    HintVector hints;
+                    m_pReadAheadManager->hintReader(rate, &hints, channelCount);
+                    ASSERT_GE(hints.size(), 2);
+                    EXPECT_EQ(target + (reverse ? 0 : -64), hints[0].frame);
+                    EXPECT_EQ(64, hints[0].frameCount);
+                }
+                m_pReader->partialOnRead = -1;
+                const auto retry = m_pReadAheadManager->getNextSamplesForStretch(
+                        rate, m_pBuffer, 64 * channels, channelCount);
+                ASSERT_FALSE(retry.unavailable);
+                EXPECT_EQ(64 * channels, retry.samplesRead);
+                EXPECT_EQ(target * channels, m_pReadAheadManager->getPlaypos());
+                EXPECT_EQ(1u, readLogSize());
+            }
+        }
+    }
+}
+
+TEST_F(ReadAheadManagerTest, PartialEofPaddingRemainsSuccessfulStretchInput) {
+    for (const int channels : {2, 8}) {
+        for (const bool reverse : {false, true}) {
+            const auto channelCount = mixxx::audio::ChannelCount(channels);
+            m_pReadAheadManager->notifySeek(100 * channels);
+            m_pLoopControl->pushValues(kNoTrigger, kNoTrigger);
+            m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+            m_pReader->readCount = 0;
+            m_pReader->partialOnRead = 1;
+            m_pReader->partialCacheMiss = false;
+            const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+                    reverse ? -1 : 1, m_pBuffer, 64 * channels, channelCount);
+            EXPECT_FALSE(read.unavailable);
+            EXPECT_EQ(64 * channels, read.samplesRead);
+            EXPECT_EQ((reverse ? 36 : 164) * channels, m_pReadAheadManager->getPlaypos());
+            m_pReader->partialOnRead = -1;
+            m_pReader->partialCacheMiss = true;
+        }
+    }
+}
+
+TEST_F(ReadAheadManagerTest, ReaderDistinguishesPaddedCacheMissFromTrackPadding) {
+    setReaderRange(0, 1000);
+    for (const int channels : {2, 8}) {
+        for (const bool reverse : {false, true}) {
+            const auto channelCount = mixxx::audio::ChannelCount(channels);
+            const auto missing = m_pReader->CachingReader::read(
+                    (reverse ? 32 : -32) * channels,
+                    64 * channels,
+                    reverse,
+                    m_pBuffer,
+                    channelCount);
+            EXPECT_EQ(CachingReader::ReadResult::PARTIALLY_UNAVAILABLE, missing);
+            const auto padding = m_pReader->CachingReader::read(
+                    (reverse ? -32 : 1000) * channels,
+                    64 * channels,
+                    reverse,
+                    m_pBuffer,
+                    channelCount);
+            EXPECT_EQ(CachingReader::ReadResult::PARTIALLY_AVAILABLE, padding);
+            for (SINT sample = 0; sample < 64 * channels; ++sample) {
+                EXPECT_EQ(0, m_pBuffer[sample]);
+            }
+        }
+    }
+}
+
+TEST_F(ReadAheadManagerTest, CrossfadeClipsToTrackAndReadsCorrectDirectionalSamples) {
+    for (const int channels : {2, 8}) {
+        for (const bool reverse : {false, true}) {
+            for (const SINT trackFrames : {16, 1000}) {
+                SCOPED_TRACE(channels);
+                SCOPED_TRACE(reverse);
+                SCOPED_TRACE(trackFrames);
+                const auto channelCount = mixxx::audio::ChannelCount(channels);
+                const SINT trigger = reverse ? 128 : 256;
+                const SINT position = trigger + (reverse ? 64 : -64);
+                const SINT target = reverse ? trackFrames - 8 : 8;
+                m_pLoopControl->setFrameInfo(mixxx::audio::FramePos(position),
+                        mixxx::audio::FramePos(trackFrames),
+                        mixxx::audio::SampleRate(44100));
+                m_pReadAheadManager->notifySeek(position * channels);
+                m_pLoopControl->pushValues(trigger * 2, target * 2);
+                m_pCueControl->pushValues(kNoTrigger, kNoTrigger);
+                m_pReader->readCount = 0;
+                m_pReader->preserveSourceDirection = true;
+                const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+                        reverse ? -1 : 1, m_pBuffer, 64 * channels, channelCount);
+                ASSERT_FALSE(read.unavailable);
+                ASSERT_EQ(64 * channels, read.samplesRead);
+                EXPECT_EQ(2, m_pReader->readCount);
+                EXPECT_EQ((reverse ? trackFrames : 0) * channels,
+                        m_pReader->lastReadPosition);
+                EXPECT_EQ(8 * channels, m_pReader->lastReadSampleCount);
+                EXPECT_EQ(reverse, m_pReader->lastReadReverse);
+                for (SINT channel = 0; channel < channels; ++channel) {
+                    const SINT primarySample =
+                            (reverse ? position - 64 : position + 63) * channels + channel;
+                    const SINT secondarySample =
+                            (reverse ? trackFrames - 8 : 7) * channels + channel;
+                    const CSAMPLE expected = primarySample * (1.0f / 8) +
+                            secondarySample * (7.0f / 8);
+                    EXPECT_FLOAT_EQ(expected, m_pBuffer[63 * channels + channel]);
+                }
+                m_pReader->preserveSourceDirection = false;
+            }
         }
     }
 }

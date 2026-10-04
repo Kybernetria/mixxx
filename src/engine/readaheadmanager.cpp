@@ -243,7 +243,9 @@ SINT ReadAheadManager::readNextSamples(double dRate,
 
     const auto readResult = m_pReader->read(
             start_sample, samples_from_reader, in_reverse, pOutput, channelCount);
-    if (readResult == CachingReader::ReadResult::UNAVAILABLE) {
+    if (readResult == CachingReader::ReadResult::UNAVAILABLE ||
+            (suspendOnMiss &&
+                    readResult == CachingReader::ReadResult::PARTIALLY_UNAVAILABLE)) {
         // Cache miss - no samples written
         SampleUtil::clear(pOutput, samples_from_reader);
         // Set the cache miss flag to decide when to apply ramping
@@ -317,7 +319,7 @@ SINT ReadAheadManager::readNextSamples(double dRate,
             double overshoot = preseek_samples - samplesToSeekTrigger;
             // start the loop later accordingly to be sure the loop length is as desired
             // e.g. exactly one bar.
-            m_currentPosition += overshoot;
+            m_currentPosition += in_reverse ? -overshoot : overshoot;
 
             // Example in frames;
             // loop start 1.1 loop end 3.3 loop length 2.2
@@ -339,37 +341,38 @@ SINT ReadAheadManager::readNextSamples(double dRate,
 
         SINT crossFadeStart = 0;
         SINT crossFadeSamples = samples_from_reader;
-        if (seek_read_position < 0) {
-            // Pre-roll cannot contribute more than the primary read's span.
-            crossFadeStart = std::min(samples_from_reader, -seek_read_position);
-            crossFadeSamples -= crossFadeStart;
+        const auto trackEnd = m_pLoopingControl->getTrackFrame();
+        if (!trackEnd.isValid()) {
+            crossFadeSamples = 0;
         } else {
-            const auto trackEnd = m_pLoopingControl->getTrackFrame();
-            if (!trackEnd.isValid()) {
-                // Missing metadata must not become an overflowing buffer size.
-                crossFadeSamples = 0;
-            } else {
-                const double trackSamples = trackEnd.toSamplePos(channelCount);
-                if (seek_read_position > trackSamples) {
-                    // Reverse post-roll is bounded by the primary read too.
-                    crossFadeStart = static_cast<SINT>(std::min<double>(
-                            samples_from_reader, seek_read_position - trackSamples));
-                    crossFadeSamples -= crossFadeStart;
-                }
-            }
+            const double trackSamples = std::max<double>(0,
+                    SampleUtil::roundPlayPosToFrameStart(
+                            trackEnd.toSamplePos(channelCount), channelCount));
+            const double rangeStart = seek_read_position -
+                    (in_reverse ? samples_from_reader : 0);
+            const double rangeEnd = seek_read_position +
+                    (in_reverse ? 0 : samples_from_reader);
+            const double clippedStart = std::clamp(rangeStart, 0.0, trackSamples);
+            const double clippedEnd = std::clamp(rangeEnd, 0.0, trackSamples);
+            crossFadeSamples = static_cast<SINT>(clippedEnd - clippedStart);
+            crossFadeStart = static_cast<SINT>(std::clamp(
+                    in_reverse ? rangeEnd - clippedEnd : clippedStart - rangeStart,
+                    0.0,
+                    static_cast<double>(samples_from_reader)));
         }
 
         if (crossFadeSamples > 0) {
-            const auto readResult = m_pReader->read(seek_read_position +
-                            (in_reverse ? crossFadeStart : -crossFadeStart),
+            const SINT readStart = seek_read_position +
+                    (in_reverse ? -crossFadeStart : crossFadeStart);
+            const auto readResult = m_pReader->read(readStart,
                     crossFadeSamples,
                     in_reverse,
                     m_pCrossFadeBuffer,
                     channelCount);
-            if (readResult == CachingReader::ReadResult::UNAVAILABLE) {
+            if (readResult == CachingReader::ReadResult::UNAVAILABLE ||
+                    (suspendOnMiss &&
+                            readResult == CachingReader::ReadResult::PARTIALLY_UNAVAILABLE)) {
                 if (suspendOnMiss) {
-                    const SINT readStart = seek_read_position +
-                            (in_reverse ? crossFadeStart : -crossFadeStart);
                     m_pendingReadHint = {
                             (readStart - (in_reverse ? crossFadeSamples : 0)) / channelCount,
                             crossFadeSamples / channelCount,

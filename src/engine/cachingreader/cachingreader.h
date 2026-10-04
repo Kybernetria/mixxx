@@ -95,6 +95,10 @@ class CachingReader : public QObject {
         PARTIALLY_AVAILABLE,
         // All requested samples are available and have been read into buffer
         AVAILABLE,
+        // AI-generated: Cached samples were copied and missing cache data was
+        // padded with silence. Unlike PARTIALLY_AVAILABLE, retrying can recover
+        // this data. End of AI-generated text.
+        PARTIALLY_UNAVAILABLE,
     };
 
     // Read numSamples from the SoundSource starting with sample into
@@ -136,6 +140,8 @@ class CachingReader : public QObject {
     void trackLoadFailed(TrackPointer pTrack, const QString& reason);
 
   private:
+    friend class ReadAheadManagerTest;
+
     const UserSettingsPointer m_pConfig;
 
     // Thread-safe FIFOs for communication between the engine callback and
