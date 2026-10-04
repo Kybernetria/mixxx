@@ -105,6 +105,7 @@ class EngineControl : public QObject {
     /// Seek to an exact frame, no quantizing
     /// virtual only for tests!
     virtual void seekExact(mixxx::audio::FramePos position);
+    void seekBeatJump(mixxx::audio::FramePos position);
     /// Return an EngineBuffer to target for syncing. Returns nullptr if none found.
     EngineBuffer* pickSyncTarget();
 

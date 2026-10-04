@@ -658,6 +658,10 @@ void RateControl::notifySeek(mixxx::audio::FramePos position) {
     m_pScratchController->notifySeek(position);
 }
 
+bool RateControl::scratchRequested() const {
+    return m_pScratch2Enable->toBool() || m_pScratchController->scratchRequested();
+}
+
 void RateControl::resetPositionScratchController() {
     // Resets the scratch state to avoid engine freeze due to insanley high rate
     // reported on track load while scratching.

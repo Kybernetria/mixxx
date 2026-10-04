@@ -525,7 +525,8 @@ double BpmControl::calcSyncedRate(double userTweak) {
 
     // If we are not quantized, or there are no beats, or we're leader,
     // or we're in reverse, just return the rate as-is.
-    if (!m_quantize.toBool() || !m_pBeats || m_reverseButton.toBool()) {
+    if (!m_quantize.toBool() || !m_pBeats || m_reverseButton.toBool() ||
+            (getEngineBuffer() && getEngineBuffer()->isRecoveringLiveTimeline())) {
         m_resetSyncAdjustment = true;
         return rate + userTweak;
     }

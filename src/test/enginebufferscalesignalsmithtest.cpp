@@ -29,7 +29,7 @@ class StretchReader final : public ReadAheadManager {
             for (int ch = 0; ch < channels; ++ch) {
                 const double sourceFrame = position + frame * (rate < 0 ? -1 : 1);
                 output[frame * channels + ch] = impulse
-                        ? (sourceFrame == 10000 ? 1.0f : 0.0f)
+                        ? (sourceFrame == impulseFrame ? 1.0f : 0.0f)
                         : static_cast<float>(std::sin(sourceFrame *
                                   (ch + 1) * 2 * M_PI * 440 / sourceSampleRate));
             }
@@ -43,6 +43,7 @@ class StretchReader final : public ReadAheadManager {
     int maxFrames = 8192;
     bool miss = false;
     bool impulse = false;
+    int impulseFrame = 10000;
     int sourceSampleRate = 44100;
     double position = 0;
     double totalRead = 0;
@@ -86,6 +87,78 @@ class EngineBufferScaleSignalsmithTest : public testing::Test {
     StretchReader reader;
     EngineBufferScaleSignalsmith scaler{&reader};
 };
+
+TEST_F(EngineBufferScaleSignalsmithTest, LiveRecoveryPreservesImpulseTimelineAndWorkBounds) {
+    for (const int channels : {2, 8}) {
+        for (const int frames : {64, 256, 511, 1024}) {
+            SCOPED_TRACE(channels);
+            SCOPED_TRACE(frames);
+            ready(channels);
+            reader.impulse = true;
+            reader.impulseFrame = 24000;
+            scaler.setPreparationPausedForTest(true);
+            scaler.setLiveTimeline(true);
+            std::vector<float> output(40000 * channels, 0);
+            std::vector<float> buffer(frames * channels);
+            double traversed = 0;
+            int elapsed = 0;
+            for (int i = 0; elapsed + frames <= 40000; ++i) {
+                if (i == 8) {
+                    scaler.setPreparationPausedForTest(false);
+                    for (int wait = 0; wait < 1000 && !scaler.preparationReadyForTest(); ++wait) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                    ASSERT_TRUE(scaler.preparationReadyForTest());
+                }
+                mixxxtest::callbackAllocations = 0;
+                mixxxtest::callbackDeallocations = 0;
+                mixxxtest::countCallbackAllocations = true;
+                const double delivered = scaler.scaleBuffer(buffer.data(), buffer.size());
+                mixxxtest::countCallbackAllocations = false;
+                EXPECT_EQ(0u, mixxxtest::callbackAllocations);
+                EXPECT_EQ(0u, mixxxtest::callbackDeallocations);
+                traversed += delivered + scaler.discardedFrames();
+                elapsed += frames;
+                if (delivered > 0) {
+                    EXPECT_NEAR(elapsed, traversed, 1.0);
+                }
+                const int workFrames = frames * 2;
+                const int blockFrames = std::min(frames, 256);
+                EXPECT_LE(scaler.processedBlocksForTest(),
+                        (workFrames + blockFrames - 1) / blockFrames);
+                std::copy(buffer.begin(),
+                        buffer.end(),
+                        output.begin() + (elapsed - frames) * channels);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            int peak = 0;
+            for (int frame = 1; frame < elapsed; ++frame) {
+                if (std::abs(output[frame * channels]) > std::abs(output[peak * channels])) {
+                    peak = frame;
+                }
+            }
+            EXPECT_GT(std::abs(output[peak * channels]), 0.1);
+            EXPECT_NEAR(24000, peak, 2);
+            EXPECT_FALSE(scaler.isRecoveringLiveTimeline());
+        }
+    }
+}
+
+TEST_F(EngineBufferScaleSignalsmithTest, ExactSeekCancelsLiveTimelineDebt) {
+    ready();
+    std::array<float, 512> output{};
+    scaler.setPreparationPausedForTest(true);
+    scaler.setLiveTimeline(true);
+    for (int i = 0; i < 8; ++i) {
+        EXPECT_EQ(0, scaler.scaleBuffer(output.data(), output.size()));
+    }
+    scaler.clear();
+    reader.position = 20000;
+    scaler.setPreparationPausedForTest(false);
+    EXPECT_EQ(256, scaleEventually(output.data(), output.size()));
+    EXPECT_EQ(0, scaler.discardedFrames());
+    EXPECT_FALSE(scaler.isRecoveringLiveTimeline());
+}
 
 TEST_F(EngineBufferScaleSignalsmithTest, HeldWorkerDoesNotReadOrAllocateOnCallbackAndCancels) {
     ready();

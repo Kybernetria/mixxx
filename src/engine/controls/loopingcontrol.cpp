@@ -1864,7 +1864,7 @@ void LoopingControl::slotBeatJump(double beats) {
         // seekExact bypasses Quantize, because a beat jump is implicit quantized
         const auto seekPosition = pBeats->findNBeatsFromPosition(currentPosition, beats);
         if (seekPosition.isValid()) {
-            seekExact(seekPosition);
+            seekBeatJump(seekPosition);
         }
     }
 }

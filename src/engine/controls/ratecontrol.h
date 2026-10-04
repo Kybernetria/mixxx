@@ -51,6 +51,7 @@ public:
           std::size_t samplesPerBuffer,
           bool* pReportScratching,
           bool* pReportReverse);
+  bool scratchRequested() const;
   // Callback-owned rate without foreground scratch/jog motion, cached by calculateSpeed.
   double naturalPlaybackSpeed() const {
       return m_naturalPlaybackSpeed;

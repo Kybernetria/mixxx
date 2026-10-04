@@ -432,7 +432,7 @@ void EngineSync::notifyScratching(Syncable* pSyncable, bool scratching) {
         return;
     }
     if (isFollower(pSyncable->getSyncMode())) {
-        pSyncable->getChannel()->getEngineBuffer()->requestSyncPhase();
+        pSyncable->getChannel()->getEngineBuffer()->requestSyncPhase(true);
         return;
     }
     if (isLeader(pSyncable->getSyncMode())) {

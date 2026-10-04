@@ -74,7 +74,9 @@ class EngineBuffer : public EngineObject {
         /// phase seek are scheduled at the same time.
         SEEK_STANDARD_PHASE = SEEK_STANDARD | SEEK_PHASE,
         /// #SEEK_EXACT to the other deck position
-        SEEK_CLONE = 1 << 3
+        SEEK_CLONE = 1 << 3,
+        SEEK_LIVE = 1 << 4,
+        SEEK_BEATJUMP = SEEK_EXACT | SEEK_LIVE,
     };
     Q_DECLARE_FLAGS(SeekRequests, SeekRequest);
 
@@ -135,7 +137,10 @@ class EngineBuffer : public EngineObject {
 
     // Queues a new seek position. Use SEEK_EXACT or SEEK_STANDARD as seekType
     void queueNewPlaypos(mixxx::audio::FramePos newpos, enum SeekRequest seekType);
-    void requestSyncPhase();
+    void requestSyncPhase(bool liveTimeline = false);
+    bool isRecoveringLiveTimeline() const {
+        return m_liveTimeline;
+    }
     void requestEnableSync(bool enabled);
     void requestSyncMode(SyncMode mode);
 
@@ -210,11 +215,17 @@ class EngineBuffer : public EngineObject {
 
     void seekAbs(mixxx::audio::FramePos);
     void seekExact(mixxx::audio::FramePos);
+    void seekBeatJump(mixxx::audio::FramePos);
 
     void verifyPlay();
 
 #ifdef BUILD_TESTING
     void setKeylockPreparationPausedForTest(bool paused);
+    bool keylockPreparationReadyForTest() const;
+    std::uint64_t keylockPreparationSubmissionsForTest() const;
+    bool didSeekForTest() const {
+        return m_previousBufferSeek;
+    }
 #endif
 
     void slipQuitAndAdopt();
@@ -454,6 +465,7 @@ class EngineBuffer : public EngineObject {
     QAtomicInt m_iSyncModeQueued;
     ControlValueAtomic<QueuedSeek> m_queuedSeek;
     bool m_previousBufferSeek = false;
+    bool m_liveTimeline = false;
 
     QAtomicInt m_slipQuitAndAdopt;
     /// Indicates that no seek is queued

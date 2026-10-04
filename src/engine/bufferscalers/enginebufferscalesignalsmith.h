@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 
 #include "engine/bufferscalers/enginebufferscale.h"
@@ -21,14 +22,21 @@ class EngineBufferScaleSignalsmith final : public EngineBufferScale {
     // Crossfade capture may use existing output, but must never initiate a
     // reader preroll that the newly selected scaler will immediately invalidate.
     double scaleBufferForCrossfade(CSAMPLE* output, SINT samples);
+    void setLiveTimeline(bool enabled);
+    bool isRecoveringLiveTimeline() const;
+    double discardedFrames() const;
 
 #ifdef BUILD_TESTING
     // Holds only the worker, never the callback; for deterministic handoff tests.
     void setPreparationPausedForTest(bool paused);
+    bool preparationReadyForTest() const;
+    std::uint64_t preparationSubmissionsForTest() const;
+    int processedBlocksForTest() const;
 #endif
 
   private:
     void onSignalChanged() override;
+    double scaleBufferInternal(CSAMPLE* output, SINT samples, bool mainRender);
     struct State;
     std::unique_ptr<State> m_state;
 };

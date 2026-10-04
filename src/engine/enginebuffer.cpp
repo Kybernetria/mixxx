@@ -422,9 +422,9 @@ void EngineBuffer::queueNewPlaypos(mixxx::audio::FramePos position, enum SeekReq
     m_queuedSeek.setValue({position, seekType});
 }
 
-void EngineBuffer::requestSyncPhase() {
+void EngineBuffer::requestSyncPhase(bool liveTimeline) {
     // Don't overwrite m_iSeekQueued
-    m_iSeekPhaseQueued = 1;
+    m_iSeekPhaseQueued.fetchAndOrRelaxed(liveTimeline ? SEEK_LIVE : SEEK_PHASE);
 }
 
 void EngineBuffer::requestEnableSync(bool enabled) {
@@ -758,6 +758,11 @@ void EngineBuffer::seekExact(mixxx::audio::FramePos position) {
     doSeekPlayPos(position, SEEK_EXACT);
 }
 
+void EngineBuffer::seekBeatJump(mixxx::audio::FramePos position) {
+    DEBUG_ASSERT(position.isValid());
+    doSeekPlayPos(position, SEEK_BEATJUMP);
+}
+
 double EngineBuffer::fractionalPlayposFromAbsolute(mixxx::audio::FramePos absolutePlaypos) {
     if (!m_trackEndPositionOld.isValid()) {
         return 0.0;
@@ -877,6 +882,14 @@ void EngineBuffer::slotControlStop(double v)
 #ifdef BUILD_TESTING
 void EngineBuffer::setKeylockPreparationPausedForTest(bool paused) {
     m_pScaleSignalsmith->setPreparationPausedForTest(paused);
+}
+
+bool EngineBuffer::keylockPreparationReadyForTest() const {
+    return m_pScaleSignalsmith->preparationReadyForTest();
+}
+
+std::uint64_t EngineBuffer::keylockPreparationSubmissionsForTest() const {
+    return m_pScaleSignalsmith->preparationSubmissionsForTest();
 }
 #endif
 
@@ -1009,6 +1022,19 @@ void EngineBuffer::processTrackLocked(
         }
     }
 
+    const bool finishScratchHandoff = m_scratching_old && !is_scratching && !is_reverse &&
+            useIndependentPitchAndTempoScaling && m_pScale == m_pScaleVinyl &&
+            m_quantize.toBool() && m_pSyncControl->getSyncMode() == SyncMode::Follower &&
+            m_pBpmControl->getLocalBpm().isValid() && !paused;
+    if (finishScratchHandoff) {
+        useIndependentPitchAndTempoScaling = false;
+        pitchRatio = speed;
+    }
+    if (is_scratching || is_reverse || paused || !m_quantize.toBool() ||
+            m_pSyncControl->getSyncMode() != SyncMode::Follower) {
+        m_liveTimeline = false;
+    }
+
     if (speed != 0.0 || is_scratching) {
         // Do not switch scaler when we have no transport, except when we start scratching.
         enableIndependentPitchTempoScaling(useIndependentPitchAndTempoScaling,
@@ -1139,10 +1165,19 @@ void EngineBuffer::processTrackLocked(
             ? baseSampleRate * m_pRateControl->naturalPlaybackSpeed()
             : rate;
 
+    double discardedFrames = 0;
     // If the buffer is not paused, then scale the audio.
     if (!bCurBufferPaused) {
         // Perform scaling of Reader buffer into buffer.
+        m_liveTimeline &= m_pScale == m_pScaleSignalsmith;
+        m_pScaleSignalsmith->setLiveTimeline(m_liveTimeline);
         const double framesRead = m_pScale->scaleBuffer(pOutput, bufferSize);
+        discardedFrames = m_pScale == m_pScaleSignalsmith
+                ? m_pScaleSignalsmith->discardedFrames()
+                : 0;
+        if (m_pScale == m_pScaleSignalsmith) {
+            m_liveTimeline = m_pScaleSignalsmith->isRecoveringLiveTimeline();
+        }
         // Lookahead gathered for asynchronous preroll is not audible transport.
         // Use delivered source frames, not position deltas (which include loops).
         m_renderedIndicatorSpeed = baseSampleRate > 0
@@ -1157,9 +1192,13 @@ void EngineBuffer::processTrackLocked(
 
         if (m_bScalerOverride) {
             // If testing, we don't have a real log so we fake the position.
-            m_playPos += framesRead;
+            m_playPos += discardedFrames + framesRead;
         } else {
             // Adjust filepos_play by the amount we processed.
+            if (discardedFrames > 0) {
+                m_playPos = m_pReadAheadManager->getFilePlaypositionFromLog(
+                        m_playPos, discardedFrames, m_channelCount);
+            }
             m_playPos = m_pReadAheadManager->getFilePlaypositionFromLog(
                     m_playPos, framesRead, m_channelCount);
         }
@@ -1212,7 +1251,7 @@ void EngineBuffer::processTrackLocked(
     // Ife it's really desired, should this be moved to looping control in order
     // to set the sync'ed playposition right away and fill the wrap-around buffer
     // with correct samples from the sync'ed loop in / track start position?
-    if (m_pRepeat->toBool() && m_quantize.toBool() &&
+    if (m_pRepeat->toBool() && m_quantize.toBool() && discardedFrames == 0 &&
             m_renderedIndicatorSpeed != 0 &&
             (m_playPos > playpos_old) == backwards) {
         // TODO() The resulting seek is processed in the following callback
@@ -1390,10 +1429,16 @@ void EngineBuffer::processSeek(bool paused) {
 
     SeekRequests seekType = queuedSeek.seekType;
     mixxx::audio::FramePos position = queuedSeek.position;
-
-    // Add SEEK_PHASE bit, if any
-    if (m_iSeekPhaseQueued.fetchAndStoreRelease(0)) {
+    bool liveTimeline = seekType.testFlag(SEEK_LIVE);
+    seekType.setFlag(SEEK_LIVE, false);
+    const int phaseRequest = m_iSeekPhaseQueued.fetchAndStoreRelease(0);
+    const bool livePhase = phaseRequest & SEEK_LIVE;
+    const bool acceptLivePhase = queuedSeek.seekType != SEEK_EXACT && !paused &&
+            m_quantize.toBool() && m_pSyncControl->getSyncMode() == SyncMode::Follower &&
+            !m_pRateControl->scratchRequested();
+    if (phaseRequest && (!livePhase || acceptLivePhase)) {
         seekType |= SEEK_PHASE;
+        liveTimeline |= livePhase;
     }
 
     switch (seekType) {
@@ -1431,6 +1476,8 @@ void EngineBuffer::processSeek(bool paused) {
     VERIFY_OR_DEBUG_ASSERT(position.isValid()) {
         return;
     }
+    m_liveTimeline = liveTimeline && !paused && m_quantize.toBool() &&
+            m_pSyncControl->getSyncMode() == SyncMode::Follower;
 
     // Don't allow the playposition to go past the end.
     position = std::min<mixxx::audio::FramePos>(position, m_trackEndPositionOld);

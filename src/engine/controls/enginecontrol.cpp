@@ -94,6 +94,12 @@ void EngineControl::seekExact(mixxx::audio::FramePos position) {
     }
 }
 
+void EngineControl::seekBeatJump(mixxx::audio::FramePos position) {
+    if (m_pEngineBuffer) {
+        m_pEngineBuffer->seekBeatJump(position);
+    }
+}
+
 EngineBuffer* EngineControl::pickSyncTarget() {
     EngineMixer* pEngineMixer = getEngineMixer();
     if (!pEngineMixer) {

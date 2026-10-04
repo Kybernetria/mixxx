@@ -326,6 +326,10 @@ void PositionScratchController::process(double currentSamplePos,
     m_prevSamplePos = currentSamplePos;
 }
 
+bool PositionScratchController::scratchRequested() const {
+    return m_pScratchEnable->toBool() || m_isScratching;
+}
+
 void PositionScratchController::notifySeek(mixxx::audio::FramePos position) {
     // Scratching continues after seek due to calculating the relative
     // distance traveled in m_samplePosDeltaSum

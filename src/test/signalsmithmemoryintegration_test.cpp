@@ -3,6 +3,7 @@
 #include <limits>
 #include <thread>
 
+#include "controllers/scripting/legacy/controllerscriptinterfacelegacy.h"
 #include "effects/backends/builtin/echoeffect.h"
 #include "effects/backends/effectsbackendmanager.h"
 #include "effects/effectchain.h"
@@ -91,6 +92,66 @@ class SignalsmithMemoryIntegrationTest : public SignalPathTest {
         }
         return settled == 8;
     }
+    void synchronizePlayingDecks(FramePos anchor = FramePos(3000)) {
+        ControlObject::set(ConfigKey(m_sGroup1, "quantize"), 0);
+        ControlObject::set(ConfigKey(m_sGroup2, "quantize"), 0);
+        engine()->requestSyncMode(SyncMode::None);
+        m_pChannel2->getEngineBuffer()->requestSyncMode(SyncMode::None);
+        for (auto* deck : {engine(), m_pChannel2->getEngineBuffer()}) {
+            const auto track = deck->getLoadedTrack();
+            ASSERT_TRUE(track->trySetBeats(mixxx::Beats::fromConstTempo(
+                    track->getSampleRate(), FramePos(0), mixxx::Bpm(120))));
+            deck->setKeylockPreparationPausedForTest(true);
+            deck->seekExact(anchor);
+        }
+        const auto submissions1 = engine()->keylockPreparationSubmissionsForTest();
+        auto* leader = m_pChannel2->getEngineBuffer();
+        const auto submissions2 = leader->keylockPreparationSubmissionsForTest();
+        ControlObject::set(ConfigKey(m_sGroup1, "play"), 1);
+        ControlObject::set(ConfigKey(m_sGroup2, "play"), 1);
+        for (int i = 0; i < 1000 &&
+                (engine()->keylockPreparationSubmissionsForTest() == submissions1 ||
+                        leader->keylockPreparationSubmissionsForTest() == submissions2);
+                ++i) {
+            process();
+            QTest::qSleep(1);
+        }
+        ASSERT_GT(engine()->keylockPreparationSubmissionsForTest(), submissions1);
+        ASSERT_GT(leader->keylockPreparationSubmissionsForTest(), submissions2);
+        for (auto* deck : {engine(), leader}) {
+            deck->setKeylockPreparationPausedForTest(false);
+        }
+        for (int i = 0; i < 1000 &&
+                (!engine()->keylockPreparationReadyForTest() ||
+                        !leader->keylockPreparationReadyForTest());
+                ++i) {
+            QTest::qWait(1);
+        }
+        ASSERT_TRUE(engine()->keylockPreparationReadyForTest());
+        ASSERT_TRUE(leader->keylockPreparationReadyForTest());
+        int settled = 0;
+        for (int i = 0; i < 500 && settled < 8; ++i) {
+            const auto before = engine()->getExactPlayPos();
+            process();
+            settled = engine()->getExactPlayPos() ==
+                                    m_pChannel2->getEngineBuffer()->getExactPlayPos() &&
+                            engine()->getExactPlayPos() > before
+                    ? settled + 1
+                    : 0;
+            QTest::qSleep(1);
+        }
+        ASSERT_EQ(8, settled);
+        m_pChannel2->getEngineBuffer()->requestSyncMode(SyncMode::LeaderExplicit);
+        engine()->requestSyncMode(SyncMode::Follower);
+        process();
+        ControlObject::set(ConfigKey(m_sGroup1, "quantize"), 1);
+        ControlObject::set(ConfigKey(m_sGroup2, "quantize"), 1);
+        process();
+        ASSERT_EQ(1, ControlObject::get(ConfigKey(m_sGroup1, "sync_mode")));
+        ASSERT_EQ(3, ControlObject::get(ConfigKey(m_sGroup2, "sync_mode")));
+        ASSERT_EQ(engine()->getExactPlayPos(),
+                m_pChannel2->getEngineBuffer()->getExactPlayPos());
+    }
     void verifyScratchSlipRestoration(
             bool waveformScratch, bool reverse, double scratchRate = 0.75) {
         ASSERT_TRUE(startSteadyPlayback());
@@ -139,6 +200,254 @@ class SignalsmithMemoryIntegrationTest : public SignalPathTest {
         engine()->setKeylockPreparationPausedForTest(false);
     }
 };
+
+TEST_F(SignalsmithMemoryIntegrationTest, SyncedBeatJumpResumesOnMovingTimeline) {
+    synchronizePlayingDecks();
+    ASSERT_FALSE(HasFatalFailure());
+    const auto leaderAtRequest = m_pChannel2->getEngineBuffer()->getExactPlayPos();
+    engine()->setKeylockPreparationPausedForTest(true);
+    ControlObject::set(ConfigKey(m_sGroup1, "beatjump"), 1);
+    const auto jumpPosition = engine()->queuedSeekPosition();
+    ASSERT_TRUE(jumpPosition.isValid());
+    for (int i = 0; i < 12; ++i) {
+        process();
+        QTest::qSleep(1);
+    }
+    engine()->setKeylockPreparationPausedForTest(false);
+    const auto visual = VisualPlayPosition::getVisualPlayPosition(m_sGroup1);
+    bool resumed = false;
+    for (int i = 0; i < 500 && !resumed; ++i) {
+        process();
+        resumed = visual->getEnginePlayRateForTest() > 0;
+        QTest::qSleep(1);
+    }
+    ASSERT_TRUE(resumed);
+    const auto expected = jumpPosition +
+            (m_pChannel2->getEngineBuffer()->getExactPlayPos() - leaderAtRequest);
+    EXPECT_NEAR(0, engine()->getExactPlayPos() - expected, 1.0);
+    for (int i = 0; i < 8; ++i) {
+        process();
+        const auto currentExpected = jumpPosition +
+                (m_pChannel2->getEngineBuffer()->getExactPlayPos() - leaderAtRequest);
+        EXPECT_NEAR(0, engine()->getExactPlayPos() - currentExpected, 1.0);
+        QTest::qSleep(1);
+    }
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, SyncedScratchReleaseDoesNotPrepareObsoleteAnchor) {
+    synchronizePlayingDecks();
+    ASSERT_FALSE(HasFatalFailure());
+    engine()->setKeylockPreparationPausedForTest(true);
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 1);
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2"), -0.5);
+    for (int i = 0; i < 4; ++i) {
+        process();
+    }
+    const auto submissions = engine()->keylockPreparationSubmissionsForTest();
+    const auto beforeRelease = engine()->getExactPlayPos();
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 0);
+    process();
+    EXPECT_GT(engine()->getExactPlayPos(), beforeRelease);
+    EXPECT_EQ(submissions, engine()->keylockPreparationSubmissionsForTest());
+    process();
+    EXPECT_EQ(submissions + 1, engine()->keylockPreparationSubmissionsForTest());
+    for (int i = 0; i < 12; ++i) {
+        process();
+        QTest::qSleep(1);
+    }
+    engine()->setKeylockPreparationPausedForTest(false);
+    const auto visual = VisualPlayPosition::getVisualPlayPosition(m_sGroup1);
+    bool resumed = false;
+    for (int i = 0; i < 500 && !resumed; ++i) {
+        process();
+        resumed = visual->getEnginePlayRateForTest() > 0;
+        QTest::qSleep(1);
+    }
+    ASSERT_TRUE(resumed);
+    EXPECT_NEAR(0,
+            std::remainder(engine()->getExactPlayPos() -
+                            m_pChannel2->getEngineBuffer()->getExactPlayPos(),
+                    22050.0),
+            1.0);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, OrdinaryPhaseRequestCannotDowngradeLiveRelease) {
+    synchronizePlayingDecks();
+    ASSERT_FALSE(HasFatalFailure());
+    engine()->setKeylockPreparationPausedForTest(true);
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 1);
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2"), -0.5);
+    for (int i = 0; i < 4; ++i) {
+        process();
+    }
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 0);
+    process();
+    engine()->requestSyncPhase();
+    process();
+    EXPECT_TRUE(engine()->isRecoveringLiveTimeline());
+    engine()->setKeylockPreparationPausedForTest(false);
+    const auto visual = VisualPlayPosition::getVisualPlayPosition(m_sGroup1);
+    bool resumed = false;
+    for (int i = 0; i < 500 && !resumed; ++i) {
+        process();
+        resumed = visual->getEnginePlayRateForTest() > 0;
+        QTest::qSleep(1);
+    }
+    ASSERT_TRUE(resumed);
+    EXPECT_NEAR(0,
+            std::remainder(engine()->getExactPlayPos() -
+                            m_pChannel2->getEngineBuffer()->getExactPlayPos(),
+                    22050.0),
+            1.0);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, ExactCueSupersedesQueuedScratchReleasePhase) {
+    synchronizePlayingDecks();
+    ASSERT_FALSE(HasFatalFailure());
+    engine()->setKeylockPreparationPausedForTest(true);
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 1);
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2"), -0.5);
+    for (int i = 0; i < 4; ++i) {
+        process();
+    }
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 0);
+    process();
+    engine()->requestSyncPhase();
+    engine()->seekExact(FramePos(5001));
+    for (int i = 0; i < 12; ++i) {
+        process();
+        EXPECT_EQ(FramePos(5001), engine()->getExactPlayPos());
+        EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
+    }
+    engine()->setKeylockPreparationPausedForTest(false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, ScratchReleaseUsesCallbackPhaseNotDeckProcessOrder) {
+    synchronizePlayingDecks();
+    ASSERT_FALSE(HasFatalFailure());
+    auto* follower = m_pChannel2->getEngineBuffer();
+    engine()->requestSyncMode(SyncMode::LeaderExplicit);
+    follower->requestSyncMode(SyncMode::Follower);
+    process();
+    ASSERT_EQ(1, ControlObject::get(ConfigKey(m_sGroup2, "sync_mode")));
+    follower->setKeylockPreparationPausedForTest(true);
+    ControlObject::set(ConfigKey(m_sGroup2, "scratch2_enable"), 1);
+    ControlObject::set(ConfigKey(m_sGroup2, "scratch2"), -0.5);
+    for (int i = 0; i < 4; ++i) {
+        process();
+    }
+    ControlObject::set(ConfigKey(m_sGroup2, "scratch2_enable"), 0);
+    process();
+    for (int i = 0; i < 12; ++i) {
+        process();
+        QTest::qSleep(1);
+    }
+    follower->setKeylockPreparationPausedForTest(false);
+    const auto visual = VisualPlayPosition::getVisualPlayPosition(m_sGroup2);
+    bool resumed = false;
+    for (int i = 0; i < 500 && !resumed; ++i) {
+        process();
+        resumed = visual->getEnginePlayRateForTest() > 0;
+        QTest::qSleep(1);
+    }
+    ASSERT_TRUE(resumed);
+    EXPECT_NEAR(0,
+            std::remainder(
+                    follower->getExactPlayPos() - engine()->getExactPlayPos(),
+                    22050.0),
+            1.0);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, NaturalPitchBeatJumpDoesNotLatchLiveRecovery) {
+    synchronizePlayingDecks();
+    ASSERT_FALSE(HasFatalFailure());
+    ControlObject::set(ConfigKey(m_sGroup1, "keylock"), 0);
+    process();
+    const auto before = engine()->getExactPlayPos();
+    ControlObject::set(ConfigKey(m_sGroup1, "beatjump"), 1);
+    process();
+    EXPECT_GT(engine()->getExactPlayPos().value(), before.value() + 22050);
+    EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, ScratchReentryCancelsQueuedReleasePhase) {
+    synchronizePlayingDecks();
+    ASSERT_FALSE(HasFatalFailure());
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 1);
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2"), -0.5);
+    for (int i = 0; i < 4; ++i) {
+        process();
+    }
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 0);
+    process();
+    const auto before = engine()->getExactPlayPos();
+    ControlObject::set(ConfigKey(m_sGroup1, "scratch2_enable"), 1);
+    process();
+    EXPECT_FALSE(engine()->didSeekForTest());
+    EXPECT_TRUE(engine()->getScratching());
+    EXPECT_LT(std::abs(engine()->getExactPlayPos() - before), kProcessBufferSize);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, NativeScratchRampHandsOffWithoutObsoletePreparation) {
+    synchronizePlayingDecks(FramePos(30000));
+    ASSERT_FALSE(HasFatalFailure());
+    mixxx::Time::start();
+    const RuntimeLoggingCategory logger(QByteArrayLiteral("test.nativeScratch"));
+    ControllerScriptInterfaceLegacy native(nullptr, logger);
+    constexpr double alpha = 1.0 / 8;
+    native.scratchEnable(1, 248, 33 + 1.0 / 3, alpha, alpha / 32);
+    for (int i = 0; i < 16; ++i) {
+        native.scratchTick(1, -1);
+        mixxx::Time::addTestTime(std::chrono::milliseconds(2));
+        QTest::qWait(2);
+        process();
+    }
+    ASSERT_TRUE(engine()->getScratching());
+    native.scratchDisable(1);
+    ASSERT_TRUE(native.isScratching(1));
+    bool released = false;
+    for (int i = 0; i < 1000 && !released; ++i) {
+        mixxx::Time::addTestTime(std::chrono::milliseconds(1));
+        QTest::qWait(1);
+        released = !native.isScratching(1);
+        const auto before = engine()->getExactPlayPos();
+        const auto submissions = engine()->keylockPreparationSubmissionsForTest();
+        process();
+        if (released) {
+            EXPECT_GT(engine()->getExactPlayPos(), before);
+            EXPECT_FALSE(engine()->getScratching());
+            EXPECT_EQ(submissions, engine()->keylockPreparationSubmissionsForTest());
+        }
+    }
+    ASSERT_TRUE(released);
+    const auto leaderAtPhase = m_pChannel2->getEngineBuffer()->getExactPlayPos();
+    process();
+    const auto phaseAnchor = engine()->getExactPlayPos();
+    ASSERT_TRUE(engine()->didSeekForTest());
+    EXPECT_NEAR(0, std::remainder(phaseAnchor - leaderAtPhase, 22050.0), 1.0)
+            << "follower ratio " << engine()->getRateRatio()
+            << " leader ratio " << m_pChannel2->getEngineBuffer()->getRateRatio()
+            << " offset " << engine()->getUserOffset();
+    const auto visual = VisualPlayPosition::getVisualPlayPosition(m_sGroup1);
+    bool resumed = false;
+    for (int i = 0; i < 500 && !resumed; ++i) {
+        process();
+        resumed = visual->getEnginePlayRateForTest() > 0;
+        QTest::qSleep(1);
+    }
+    ASSERT_TRUE(resumed);
+    EXPECT_NEAR(0,
+            engine()->getExactPlayPos() - phaseAnchor -
+                    (m_pChannel2->getEngineBuffer()->getExactPlayPos() -
+                            leaderAtPhase),
+            1.0)
+            << "recovery ratio " << engine()->getRateRatio();
+    EXPECT_NEAR(0,
+            std::remainder(engine()->getExactPlayPos() -
+                            m_pChannel2->getEngineBuffer()->getExactPlayPos(),
+                    22050.0),
+            1.0);
+}
 
 TEST_F(SignalsmithMemoryIntegrationTest, PendingPrerollHoldsCueAndOtherDecksContinue) {
     for (const auto& group : {m_sGroup1, m_sGroup2, m_sGroup3}) {

@@ -182,6 +182,9 @@ struct EngineBufferScaleSignalsmith::State {
     double fraction = 0;
     double outputRate = 0;
     bool resuming = false;
+    bool liveTimeline = false;
+    double missedFrames = 0;
+    double discardedFrames = 0;
 
     // One-slot publication and retirement. While a seek is outstanding, active
     // is null but adopted remains unchanged to avoid building a duplicate format.
@@ -196,6 +199,8 @@ struct EngineBufferScaleSignalsmith::State {
     std::atomic<bool> stopping{false};
 #ifdef BUILD_TESTING
     std::atomic<bool> testPreparationPaused{false};
+    std::uint64_t testPreparationSubmissions = 0;
+    int testProcessedBlocks = 0;
 #endif
     std::thread worker;
 };
@@ -208,6 +213,18 @@ EngineBufferScaleSignalsmith::~EngineBufferScaleSignalsmith() = default;
 #ifdef BUILD_TESTING
 void EngineBufferScaleSignalsmith::setPreparationPausedForTest(bool paused) {
     m_state->testPreparationPaused.store(paused, std::memory_order_release);
+}
+
+bool EngineBufferScaleSignalsmith::preparationReadyForTest() const {
+    return m_state->seekCompleted.load(std::memory_order_acquire) != nullptr;
+}
+
+std::uint64_t EngineBufferScaleSignalsmith::preparationSubmissionsForTest() const {
+    return m_state->testPreparationSubmissions;
+}
+
+int EngineBufferScaleSignalsmith::processedBlocksForTest() const {
+    return m_state->testProcessedBlocks;
 }
 #endif
 
@@ -262,6 +279,24 @@ void EngineBufferScaleSignalsmith::clear() {
     state.availableOutput = 0;
     state.fraction = 0;
     state.resuming = false;
+    setLiveTimeline(false);
+}
+
+void EngineBufferScaleSignalsmith::setLiveTimeline(bool enabled) {
+    auto& state = *m_state;
+    if (state.liveTimeline != enabled) {
+        state.liveTimeline = enabled;
+        state.missedFrames = 0;
+        state.discardedFrames = 0;
+    }
+}
+
+bool EngineBufferScaleSignalsmith::isRecoveringLiveTimeline() const {
+    return m_state->liveTimeline;
+}
+
+double EngineBufferScaleSignalsmith::discardedFrames() const {
+    return m_state->discardedFrames;
 }
 
 double EngineBufferScaleSignalsmith::scaleBufferForCrossfade(CSAMPLE* output, SINT samples) {
@@ -274,29 +309,80 @@ double EngineBufferScaleSignalsmith::scaleBufferForCrossfade(CSAMPLE* output, SI
             !state.active || state.active->key != state.requested.load(std::memory_order_acquire)) {
         return 0;
     }
-    return scaleBuffer(output, samples);
+    return scaleBufferInternal(output, samples, false);
 }
 
 double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) {
-    if (!output || samples <= 0)
-        return 0;
-    SampleUtil::clear(output, samples);
-    auto& state = *m_state;
-    if (!state.acceptAndAdoptForCallback() || samples <= 0 || m_effectiveRate <= 0) {
+    return scaleBufferInternal(output, samples, true);
+}
+
+double EngineBufferScaleSignalsmith::scaleBufferInternal(
+        CSAMPLE* output, SINT samples, bool mainRender) {
+    if (!output || samples <= 0) {
         return 0;
     }
-    auto& config = *state.active;
-    const int channels = config.channels;
-    if (samples % channels != 0 || samples / channels > static_cast<int>(kMaxEngineFrames)) {
+    SampleUtil::clear(output, samples);
+    auto& state = *m_state;
+    state.discardedFrames = 0;
+#ifdef BUILD_TESTING
+    state.testProcessedBlocks = 0;
+#endif
+    const int channels = getOutputSignal().getChannelCount();
+    if (channels <= 0 || samples % channels != 0 ||
+            samples / channels > static_cast<int>(kMaxEngineFrames) || m_effectiveRate <= 0) {
         return 0;
     }
     const int frames = samples / channels;
+    const bool recovering = mainRender && state.liveTimeline;
+    const int extraFrames = recovering ? frames : 0;
+    int extraRemaining = extraFrames;
+    int workRemaining = frames + extraFrames;
     int written = 0;
+    bool muted = false;
+    const auto finish = [&] {
+        if (recovering) {
+            if (!muted && written < frames) {
+                state.missedFrames += (frames - written) * m_effectiveRate;
+            } else if (written == frames) {
+                state.liveTimeline = false;
+                state.missedFrames = 0;
+            }
+        }
+    };
+    if (!state.acceptAndAdoptForCallback()) {
+        finish();
+        return 0;
+    }
+    auto& config = *state.active;
+    const int outputFrames = std::min(frames, kOutputFrames);
     int reads = 0;
     int zeroReads = 0;
+    int processed = 0;
+    const int processBudget = (frames + extraFrames + outputFrames - 1) / outputFrames;
     double consumedFrames = 0;
-    while (written < frames) {
+    while (written < frames && workRemaining > 0) {
         if (state.availableOutput) {
+            if (recovering && state.missedFrames >= state.outputRate) {
+                if (!muted && extraRemaining == 0) {
+                    muted = true;
+                    state.missedFrames += frames * m_effectiveRate;
+                }
+                const int budget = muted ? workRemaining : extraRemaining;
+                const int count = static_cast<int>(std::min<double>(
+                        std::min(state.availableOutput, budget),
+                        std::floor(state.missedFrames / state.outputRate)));
+                state.outputOffset += count;
+                state.availableOutput -= count;
+                workRemaining -= count;
+                extraRemaining -= std::min(extraRemaining, count);
+                const double discarded = count * state.outputRate;
+                state.discardedFrames += discarded;
+                state.missedFrames -= discarded;
+                continue;
+            }
+            if (muted) {
+                break;
+            }
             const int count = std::min(state.availableOutput, frames - written);
             for (int frame = 0; frame < count; ++frame) {
                 for (int ch = 0; ch < channels; ++ch) {
@@ -314,6 +400,7 @@ double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) 
             state.outputOffset += count;
             state.availableOutput -= count;
             written += count;
+            workRemaining -= count;
             consumedFrames += state.outputRate * count;
             continue;
         }
@@ -322,14 +409,14 @@ double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) 
             const double pitch = m_dBaseRate * m_dPitchRatio;
             const double required = state.needsPreroll
                     ? config.stretch.inputLatency() + rate * config.stretch.outputLatency()
-                    : rate * kOutputFrames + state.fraction;
+                    : rate * outputFrames + state.fraction;
             if (!util_isfinite(required) || required > kInputFrames) {
                 break;
             }
             const int inputRequired = static_cast<int>(required);
             state.pending.emplace(State::PendingInputBatch{rate,
                     pitch,
-                    state.needsPreroll ? 0 : kOutputFrames,
+                    state.needsPreroll ? 0 : outputFrames,
                     inputRequired,
                     0,
                     state.needsPreroll ? state.fraction : required - inputRequired});
@@ -345,6 +432,7 @@ double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) 
                     getOutputSignal().getChannelCount());
             if (result.unavailable) {
                 state.resuming = true;
+                finish();
                 return consumedFrames;
             }
             const int readFrames = result.samplesRead / channels;
@@ -370,9 +458,20 @@ double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) 
             state.seekOutstanding = true;
             state.needsPreroll = false;
             state.pending.reset();
+#ifdef BUILD_TESTING
+            ++state.testPreparationSubmissions;
+#endif
             state.seekRequest.store(&config, std::memory_order_release);
+            finish();
             return consumedFrames;
         } else {
+            if (processed == processBudget) {
+                break;
+            }
+            ++processed;
+#ifdef BUILD_TESTING
+            ++state.testProcessedBlocks;
+#endif
             config.stretch.setTransposeFactor(batch.pitch);
             config.stretch.setFormantFactor(1);
             config.stretch.process(config.inputPointers.data(),
@@ -386,5 +485,6 @@ double EngineBufferScaleSignalsmith::scaleBuffer(CSAMPLE* output, SINT samples) 
         }
         state.pending.reset();
     }
+    finish();
     return consumedFrames;
 }

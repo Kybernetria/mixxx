@@ -25,6 +25,7 @@ class PositionScratchController : public QObject {
             int wrappedAround,
             mixxx::audio::FramePos trigger,
             mixxx::audio::FramePos target);
+    bool scratchRequested() const;
     bool isEnabled() const {
         // TODO return true only if m_rate is valid.
         return m_isScratching;
