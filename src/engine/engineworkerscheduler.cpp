@@ -12,13 +12,16 @@ EngineWorkerScheduler::EngineWorkerScheduler(QObject* pParent)
 }
 
 EngineWorkerScheduler::~EngineWorkerScheduler() {
+    stopAndWait();
+}
+
+void EngineWorkerScheduler::stopAndWait() {
     {
-        // tell run method to terminate
         const auto lock = lockMutex(&m_mutex);
-        m_bQuit = true;
-        m_wakeSemaphore.release();
+        if (!m_bQuit.exchange(true)) {
+            m_wakeSemaphore.release();
+        }
     }
-    // wait for thread to terminate
     wait();
 }
 
