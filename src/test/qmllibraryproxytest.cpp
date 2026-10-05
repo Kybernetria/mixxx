@@ -53,12 +53,11 @@ class QmlLibraryProxyTest : public MixxxTest {
         writeTestProfile(settingsPath);
 
         CmdlineArgs::Instance().setSettingsPath(settingsPath);
-        CmdlineArgs args;
-        args.setSettingsPath(settingsPath);
+        m_args.setSettingsPath(settingsPath);
 
         m_rejectFileDialogs = std::make_unique<RejectFileDialogs>();
         application()->installEventFilter(m_rejectFileDialogs.get());
-        m_coreServices = std::make_shared<mixxx::CoreServices>(args, application());
+        m_coreServices = std::make_shared<mixxx::CoreServices>(m_args, application());
         m_coreServices->initialize(application());
         application()->removeEventFilter(m_rejectFileDialogs.get());
 
@@ -88,6 +87,7 @@ class QmlLibraryProxyTest : public MixxxTest {
   private:
     QTemporaryDir m_profile;
     CmdlineArgs m_previousArgs;
+    CmdlineArgs m_args;
     std::unique_ptr<RejectFileDialogs> m_rejectFileDialogs;
     std::shared_ptr<mixxx::CoreServices> m_coreServices;
     std::vector<std::unique_ptr<ControlObject>> m_testControls;

@@ -1310,8 +1310,10 @@ TEST_F(ControllerScriptEngineLegacyTest, JavascriptPlayerProxy_KeyNotation) {
 #ifdef MIXXX_USE_QML
 class MockScreenRender : public ControllerRenderingEngine {
   public:
-    MockScreenRender(const LegacyControllerMapping::ScreenInfo& info)
-            : ControllerRenderingEngine(info, new ControllerEngineThreadControl) {};
+    MockScreenRender(const LegacyControllerMapping::ScreenInfo& info,
+            ControllerEngineThreadControl* engineThreadControl)
+            : ControllerRenderingEngine(info, engineThreadControl) {
+    }
     MOCK_METHOD(void,
             requestSendingFrameData,
             (Controller * controller, const QByteArray& frame),
@@ -1335,7 +1337,7 @@ TEST_F(ControllerScriptEngineLegacyTest, screenWontSentRawDataIfNotConfigured) {
     // Allocate screen on the heap as it need to outlive the this function,
     // since the engine will take ownership of it
     std::shared_ptr<MockScreenRender> pDummyRender =
-            std::make_shared<MockScreenRender>(dummyScreen);
+            std::make_shared<MockScreenRender>(dummyScreen, &m_engineThreadControl);
     EXPECT_CALL(*pDummyRender, requestSendingFrameData(_, _)).Times(0);
     EXPECT_LOG_MSG(QtWarningMsg,
             "Could not find a valid transform function but the screen doesn't "
@@ -1370,7 +1372,7 @@ TEST_F(ControllerScriptEngineLegacyTest, screenWillSentRawDataIfConfigured) {
     // Allocate screen on the heap as it need to outlive the this function,
     // since the engine will take ownership of it
     std::shared_ptr<MockScreenRender> pDummyRender =
-            std::make_shared<MockScreenRender>(dummyScreen);
+            std::make_shared<MockScreenRender>(dummyScreen, &m_engineThreadControl);
     EXPECT_CALL(*pDummyRender, requestSendingFrameData(_, QByteArray()));
 
     renderingScreens().insert(dummyScreen.identifier, pDummyRender);
