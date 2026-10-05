@@ -2942,6 +2942,7 @@ if(BUILD_TESTING)
     src/test/broadcastprofile_test.cpp
     src/test/broadcastsettings_test.cpp
     src/test/cache_test.cpp
+    src/test/cachingreadergeneration_test.cpp
     src/test/channelhandle_test.cpp
     src/test/chrono_clock_resolution_test.cpp
     src/test/colorconfig_test.cpp
@@ -2983,6 +2984,7 @@ if(BUILD_TESTING)
     src/test/callbackallocationcheck.cpp
     src/test/boundedatomicvalue_test.cpp
     src/test/enginebuffertest.cpp
+    src/test/enginebuffergeneration_test.cpp
     src/test/enginefilterbiquadtest.cpp
     src/test/enginemixertest.cpp
     src/test/enginemicrophonetest.cpp

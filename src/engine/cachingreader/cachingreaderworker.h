@@ -2,6 +2,7 @@
 
 #include <QMutex>
 #include <QString>
+#include <atomic>
 
 #include "audio/frame.h"
 #include "audio/types.h"
@@ -16,6 +17,7 @@ class FIFO;
 // POD with trivial ctor/dtor/copy for passing through FIFO
 typedef struct CachingReaderChunkReadRequest {
     CachingReaderChunk* chunk;
+    quint64 generation;
 
     void giveToWorker(CachingReaderChunkForOwner* chunkForOwner) {
         DEBUG_ASSERT(chunkForOwner);
@@ -42,35 +44,38 @@ typedef struct ReaderStatusUpdate {
 
   public:
     ReaderStatus status;
+    quint64 generation;
 
     void init(
             ReaderStatus statusArg,
             CachingReaderChunk* chunkArg,
-            const mixxx::IndexRange& readableFrameIndexRangeArg) {
+            const mixxx::IndexRange& readableFrameIndexRangeArg,
+            quint64 generationArg) {
         status = statusArg;
+        generation = generationArg;
         chunk = chunkArg;
         readableFrameIndexRangeStart = readableFrameIndexRangeArg.start();
         readableFrameIndexRangeEnd = readableFrameIndexRangeArg.end();
     }
 
     static ReaderStatusUpdate readDiscarded(
-            CachingReaderChunk* chunk) {
+            CachingReaderChunk* chunk, quint64 generation) {
         ReaderStatusUpdate update;
-        update.init(CHUNK_READ_DISCARDED, chunk, mixxx::IndexRange());
+        update.init(CHUNK_READ_DISCARDED, chunk, mixxx::IndexRange(), generation);
         return update;
     }
 
     static ReaderStatusUpdate trackLoaded(
-            const mixxx::IndexRange& readableFrameIndexRange) {
+            const mixxx::IndexRange& readableFrameIndexRange, quint64 generation) {
         DEBUG_ASSERT(!readableFrameIndexRange.empty());
         ReaderStatusUpdate update;
-        update.init(TRACK_LOADED, nullptr, readableFrameIndexRange);
+        update.init(TRACK_LOADED, nullptr, readableFrameIndexRange, generation);
         return update;
     }
 
-    static ReaderStatusUpdate trackUnloaded() {
+    static ReaderStatusUpdate trackUnloaded(quint64 generation) {
         ReaderStatusUpdate update;
-        update.init(TRACK_UNLOADED, nullptr, mixxx::IndexRange());
+        update.init(TRACK_UNLOADED, nullptr, mixxx::IndexRange(), generation);
         return update;
     }
 
@@ -105,9 +110,9 @@ class CachingReaderWorker : public EngineWorker {
 
     // Request to load a new track. wake() must be called afterwards.
 #ifdef __STEM__
-    void newTrack(TrackPointer pTrack, mixxx::StemChannelSelection stemMask);
+    void newTrack(TrackPointer pTrack, mixxx::StemChannelSelection stemMask, quint64 generation);
 #else
-    void newTrack(TrackPointer pTrack);
+    void newTrack(TrackPointer pTrack, quint64 generation);
 #endif
 
     // Run upkeep operations like loading tracks and reading from file. Run by a
@@ -118,20 +123,24 @@ class CachingReaderWorker : public EngineWorker {
 
   signals:
     // Emitted once a new track is loaded and ready to be read from.
-    void trackLoading();
+    void trackLoading(quint64 generation);
     void trackLoaded(TrackPointer pTrack,
             mixxx::audio::SampleRate sampleRate,
             mixxx::audio::ChannelCount channelCount,
-            mixxx::audio::FramePos numFrame);
-    void trackLoadFailed(TrackPointer pTrack, const QString& reason);
+            mixxx::audio::FramePos numFrame,
+            quint64 generation);
+    void trackLoadFailed(TrackPointer pTrack, const QString& reason, quint64 generation);
 
   private:
-#ifdef __STEM__
+    friend class CachingReaderGenerationTest;
+
     struct NewTrackRequest {
         TrackPointer track;
+#ifdef __STEM__
         mixxx::StemChannelSelection stemMask;
-    };
 #endif
+        quint64 generation;
+    };
     const QString m_group;
     QString m_tag;
 
@@ -144,17 +153,14 @@ class CachingReaderWorker : public EngineWorker {
     // lock to touch.
     QMutex m_newTrackMutex;
     QAtomicInt m_newTrackAvailable;
-#ifdef __STEM__
     NewTrackRequest m_pNewTrack;
-#else
-    TrackPointer m_pNewTrack;
-#endif
+    std::atomic<quint64> m_requestedGeneration{0};
+    quint64 m_activeGeneration = 0;
 
-    void discardAllPendingRequests();
+    bool publishStatus(const ReaderStatusUpdate& update);
+    bool discardAllPendingRequests();
 
-    /// call to be prepare for new tracks
-    /// Make sure engine has been stopped before
-    void closeAudioSource();
+    bool closeAudioSource();
 
     /// Internal method to unload a track.
     /// does not emit signals

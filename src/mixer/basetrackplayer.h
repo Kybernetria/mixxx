@@ -121,8 +121,8 @@ class BaseTrackPlayerImpl : public BaseTrackPlayer {
     void slotEjectTrack(double) final;
     void slotCloneFromGroup(const QString& group) final;
     void slotCloneDeck() final;
-    void slotTrackLoaded(TrackPointer pNewTrack, TrackPointer pOldTrack);
-    void slotLoadFailed(TrackPointer pTrack, const QString& reason);
+    void slotTrackLoaded(TrackPointer pNewTrack, TrackPointer pOldTrack, quint64 generation);
+    void slotLoadFailed(TrackPointer pTrack, const QString& reason, quint64 generation);
     void slotSetReplayGain(mixxx::ReplayGain replayGain);
     /// When the replaygain is adjusted, we modify the track pregain
     /// to compensate so there is no audible change in volume.

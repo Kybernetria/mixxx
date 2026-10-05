@@ -94,7 +94,11 @@ EngineDeck::EngineDeck(
 
 #ifdef __STEM__
 void EngineDeck::slotTrackLoaded(TrackPointer pNewTrack,
-        TrackPointer) {
+        TrackPointer,
+        quint64 generation) {
+    if (!m_pBuffer->isCurrentTrackRequest(generation)) {
+        return;
+    }
     VERIFY_OR_DEBUG_ASSERT(m_pStemCount) {
         return;
     }

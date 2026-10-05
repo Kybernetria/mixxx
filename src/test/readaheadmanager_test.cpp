@@ -281,7 +281,8 @@ class ReadAheadManagerTest : public MixxxTest {
     }
     void setReaderRange(SINT start, SINT end) {
         m_pReader->m_readableFrameIndexRange = mixxx::IndexRange::between(start, end);
-        m_pReader->m_state.storeRelease(CachingReader::STATE_TRACK_LOADED);
+        m_pReader->m_requestState.store(
+                CachingReader::packedState(0, CachingReader::STATE_TRACK_LOADED));
     }
 };
 

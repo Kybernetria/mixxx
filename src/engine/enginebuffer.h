@@ -166,6 +166,7 @@ class EngineBuffer : public EngineObject {
 
     bool isTrackLoaded() const;
     TrackPointer getLoadedTrack() const;
+    bool isCurrentTrackRequest(quint64 generation) const;
     void ejectTrack();
 
     mixxx::audio::FramePos getExactPlayPos() const;
@@ -251,25 +252,29 @@ class EngineBuffer : public EngineObject {
     void slotKeylockEngineChanged(double);
 
   signals:
-    void trackLoaded(TrackPointer pNewTrack, TrackPointer pOldTrack);
-    void trackLoadFailed(TrackPointer pTrack, const QString& reason);
+    void trackLoaded(TrackPointer pNewTrack, TrackPointer pOldTrack, quint64 generation);
+    void trackLoadFailed(TrackPointer pTrack, const QString& reason, quint64 generation);
     void noVinylControlInputConfigured();
 
   private slots:
-    void slotTrackLoading();
+    void slotTrackLoading(quint64 generation);
     void slotTrackLoaded(
             TrackPointer pTrack,
             mixxx::audio::SampleRate trackSampleRate,
             mixxx::audio::ChannelCount trackChannelCount,
-            mixxx::audio::FramePos trackNumFrame);
+            mixxx::audio::FramePos trackNumFrame,
+            quint64 generation);
     void slotTrackLoadFailed(TrackPointer pTrack,
-            const QString& reason);
+            const QString& reason,
+            quint64 generation);
     // Fired when passthrough mode is enabled or disabled.
     void slotPassthroughChanged(double v);
     void slotUpdatedTrackBeats();
     void slotUpdatedTrackBpmLock();
 
   private:
+    friend class EngineBufferGenerationTest;
+
     struct QueuedSeek {
         mixxx::audio::FramePos position;
         enum SeekRequest seekType;
@@ -308,6 +313,10 @@ class EngineBuffer : public EngineObject {
     }
     bool updateIndicatorsAndModifyPlay(bool newPlay, bool oldPlay);
     void notifyTrackLoaded(TrackPointer pNewTrack, TrackPointer pOldTrack);
+    void applyTrackLoaded(TrackPointer pTrack,
+            mixxx::audio::SampleRate trackSampleRate,
+            mixxx::audio::ChannelCount trackChannelCount,
+            mixxx::audio::FramePos trackNumFrame);
     void processTrackLocked(CSAMPLE* pOutput,
             const std::size_t bufferSize,
             mixxx::audio::SampleRate sampleRate);
@@ -501,6 +510,7 @@ class EngineBuffer : public EngineObject {
 
     TrackPointer m_pCurrentTrack;
     mutable QT_RECURSIVE_MUTEX m_trackNotificationMutex{QT_RECURSIVE_MUTEX_INIT};
+    quint64 m_readerRequestGeneration = 0;
 #ifdef __SCALER_DEBUG__
     QFile df;
     QTextStream writer;

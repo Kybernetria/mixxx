@@ -1,6 +1,7 @@
 #include "engine/cachingreader/cachingreader.h"
 
 #include <QtDebug>
+#include <algorithm>
 
 #include "moc_cachingreader.cpp"
 #include "util/assert.h"
@@ -51,11 +52,9 @@ CachingReader::CachingReader(const QString& group,
           // old requests need to be returned immediately to the CachingReader
           // that must take ownership and free them!!!
           m_chunkReadRequestFIFO(kNumberOfCachedChunksInMemory / 4),
-          // The capacity of the back channel must be equal to the number of
-          // allocated chunks, because the worker use writeBlocking(). Otherwise
-          // the worker could get stuck in a hot loop!!!
+          // AI-generated: Reserve room to return every allocated chunk, with
+          // spare slots for track lifecycle updates. End of AI-generated text.
           m_readerStatusUpdateFIFO(kNumberOfCachedChunksInMemory),
-          m_state(STATE_IDLE),
           m_mruCachingReaderChunk(nullptr),
           m_lruCachingReaderChunk(nullptr),
           m_sampleBuffer(CachingReaderChunk::kFrames * maxSupportedChannel *
@@ -65,6 +64,7 @@ CachingReader::CachingReader(const QString& group,
                   &m_readerStatusUpdateFIFO,
                   maxSupportedChannel) {
     m_allocatedCachingReaderChunks.reserve(kNumberOfCachedChunksInMemory);
+    m_freeChunks.reserve(kNumberOfCachedChunksInMemory);
     // Divide up the allocated raw memory buffer into total_chunks
     // chunks. Initialize each chunk to hold nothing and add it to the free
     // list.
@@ -103,6 +103,7 @@ void CachingReader::freeChunkFromList(CachingReaderChunkForOwner* pChunk) {
             &m_mruCachingReaderChunk,
             &m_lruCachingReaderChunk);
     pChunk->free();
+    DEBUG_ASSERT(m_freeChunks.size() < m_freeChunks.capacity());
     m_freeChunks.push_back(pChunk);
 }
 
@@ -110,11 +111,15 @@ void CachingReader::freeChunk(CachingReaderChunkForOwner* pChunk) {
     DEBUG_ASSERT(pChunk);
     DEBUG_ASSERT(pChunk->getState() != CachingReaderChunkForOwner::READ_PENDING);
 
-    const int removed = m_allocatedCachingReaderChunks.remove(pChunk->getIndex());
-    Q_UNUSED(removed); // only used in DEBUG_ASSERT
-    // We'll tolerate not being in allocatedCachingReaderChunks,
-    // because sometime you free a chunk right after you allocated it.
-    DEBUG_ASSERT(removed <= 1);
+    const auto it = std::lower_bound(m_allocatedCachingReaderChunks.begin(),
+            m_allocatedCachingReaderChunks.end(),
+            pChunk->getIndex(),
+            [](const auto* pAllocated, SINT index) {
+                return pAllocated->getIndex() < index;
+            });
+    if (it != m_allocatedCachingReaderChunks.end() && *it == pChunk) {
+        m_allocatedCachingReaderChunks.erase(it);
+    }
 
     freeChunkFromList(pChunk);
 }
@@ -141,12 +146,22 @@ CachingReaderChunkForOwner* CachingReader::allocateChunk(SINT chunkIndex) {
     if (m_freeChunks.empty()) {
         return nullptr;
     }
-    CachingReaderChunkForOwner* pChunk = m_freeChunks.front();
-    m_freeChunks.pop_front();
+    CachingReaderChunkForOwner* pChunk = m_freeChunks.back();
+    m_freeChunks.pop_back();
 
     pChunk->init(chunkIndex);
 
-    m_allocatedCachingReaderChunks.insert(chunkIndex, pChunk);
+    const auto it = std::lower_bound(m_allocatedCachingReaderChunks.begin(),
+            m_allocatedCachingReaderChunks.end(),
+            chunkIndex,
+            [](const auto* pAllocated, SINT index) {
+                return pAllocated->getIndex() < index;
+            });
+    DEBUG_ASSERT(it == m_allocatedCachingReaderChunks.end() ||
+            (*it)->getIndex() != chunkIndex);
+    DEBUG_ASSERT(m_allocatedCachingReaderChunks.size() <
+            m_allocatedCachingReaderChunks.capacity());
+    m_allocatedCachingReaderChunks.insert(it, pChunk);
 
     return pChunk;
 }
@@ -168,8 +183,16 @@ CachingReaderChunkForOwner* CachingReader::allocateChunkExpireLRU(SINT chunkInde
 }
 
 CachingReaderChunkForOwner* CachingReader::lookupChunk(SINT chunkIndex) {
-    // Defaults to nullptr if it's not in the hash.
-    auto* pChunk = m_allocatedCachingReaderChunks.value(chunkIndex, nullptr);
+    const auto it = std::lower_bound(m_allocatedCachingReaderChunks.begin(),
+            m_allocatedCachingReaderChunks.end(),
+            chunkIndex,
+            [](const auto* pAllocated, SINT index) {
+                return pAllocated->getIndex() < index;
+            });
+    auto* pChunk = it != m_allocatedCachingReaderChunks.end() &&
+                    (*it)->getIndex() == chunkIndex
+            ? *it
+            : nullptr;
     DEBUG_ASSERT(!pChunk || pChunk->getIndex() == chunkIndex);
     return pChunk;
 }
@@ -206,51 +229,54 @@ CachingReaderChunkForOwner* CachingReader::lookupChunkAndFreshen(SINT chunkIndex
 
 // Invoked from the UI thread!!
 #ifdef __STEM__
-void CachingReader::newTrack(TrackPointer pTrack, mixxx::StemChannelSelection stemMask) {
+quint64 CachingReader::newTrack(TrackPointer pTrack, mixxx::StemChannelSelection stemMask) {
 #else
-void CachingReader::newTrack(TrackPointer pTrack) {
+quint64 CachingReader::newTrack(TrackPointer pTrack) {
 #endif
-    auto newState = pTrack ? STATE_TRACK_LOADING : STATE_TRACK_UNLOADING;
-    auto oldState = m_state.fetchAndStoreAcquire(newState);
-
-    // TODO():
-    // BaseTrackPlayerImpl::slotLoadTrack() distributes the new track via
-    // emit loadingTrack(pNewTrack, pOldTrack);
-    // but the newTrack may change if we load a new track while the previous one
-    // is still loading. This leads to inconsistent states for example a different
-    // track in the Mixxx Title and the Deck label.
-    if (oldState == STATE_TRACK_LOADING &&
-            newState == STATE_TRACK_LOADING) {
-        kLogger.warning()
-                << "Loading a new track while loading a track may lead to inconsistent states";
-    }
+    const auto generation = beginTrackRequest(pTrack != nullptr);
 #ifdef __STEM__
-    m_worker.newTrack(std::move(pTrack), stemMask);
+    m_worker.newTrack(std::move(pTrack), stemMask, generation);
 #else
-    m_worker.newTrack(std::move(pTrack));
+    m_worker.newTrack(std::move(pTrack), generation);
 #endif
+    return generation;
+}
+
+quint64 CachingReader::beginTrackRequest(bool loading) {
+    auto previous = m_requestState.load(std::memory_order_acquire);
+    quint64 generation;
+    do {
+        generation = stateGeneration(previous) + 1;
+    } while (!m_requestState.compare_exchange_weak(previous,
+            packedState(generation, loading ? STATE_TRACK_LOADING : STATE_TRACK_UNLOADING),
+            std::memory_order_acq_rel,
+            std::memory_order_acquire));
+    return generation;
 }
 
 // Called from the engine thread
 void CachingReader::process() {
     ReaderStatusUpdate update;
-    while (m_readerStatusUpdateFIFO.read(&update, 1) == 1) {
+    const int availableUpdates = m_readerStatusUpdateFIFO.readAvailable();
+    for (int i = 0; i < availableUpdates; ++i) {
+        if (m_readerStatusUpdateFIFO.read(&update, 1) != 1) {
+            break;
+        }
         auto* pChunk = update.takeFromWorker();
+        auto state = m_requestState.load(std::memory_order_acquire);
         if (pChunk) {
             // Result of a read request (with a chunk)
-            DEBUG_ASSERT(atomicLoadRelaxed(m_state) != STATE_IDLE);
             DEBUG_ASSERT(
                     update.status == CHUNK_READ_SUCCESS ||
                     update.status == CHUNK_READ_EOF ||
                     update.status == CHUNK_READ_INVALID ||
                     update.status == CHUNK_READ_DISCARDED);
-            if (m_state.loadAcquire() == STATE_TRACK_LOADING) {
-                // Discard all results from pending read requests for the
-                // previous track before the next track has been loaded.
+            if (update.generation != stateGeneration(state) ||
+                    update.generation != m_cacheGeneration ||
+                    requestState(state) != STATE_TRACK_LOADED) {
                 freeChunk(pChunk);
                 continue;
             }
-            DEBUG_ASSERT(atomicLoadRelaxed(m_state) == STATE_TRACK_LOADED);
             if (update.status == CHUNK_READ_SUCCESS) {
                 // Insert or freshen the chunk in the MRU/LRU list after
                 // obtaining ownership from the worker.
@@ -266,34 +292,33 @@ void CachingReader::process() {
                         update.readableFrameIndexRange());
             }
         } else {
+            if (update.generation != stateGeneration(state)) {
+                continue;
+            }
             // State update (without a chunk)
             if (update.status == TRACK_LOADED) {
-                // We have a new Track ready to go.
-                // Assert that we either have had STATE_TRACK_LOADING before and all
-                // chunks in the m_readerStatusUpdateFIFO have been discarded.
-                // or the cache has been already cleared.
-                // In case of two consecutive load events, we receive two consecutive
-                // TRACK_LOADED without a chunk in between, assert this here.
-                DEBUG_ASSERT(atomicLoadRelaxed(m_state) == STATE_TRACK_LOADING ||
-                        (atomicLoadRelaxed(m_state) == STATE_TRACK_LOADED &&
-                                !m_mruCachingReaderChunk && !m_lruCachingReaderChunk));
-                // now purge also the recently used chunk list from the old track.
-                if (m_mruCachingReaderChunk || m_lruCachingReaderChunk) {
-                    DEBUG_ASSERT(atomicLoadRelaxed(m_state) == STATE_TRACK_LOADING);
-                    freeAllChunks();
+                if (requestState(state) != STATE_TRACK_LOADING) {
+                    continue;
                 }
+                freeAllChunks();
                 // Reset the readable frame index range
                 m_readableFrameIndexRange = update.readableFrameIndexRange();
-                m_state.storeRelease(STATE_TRACK_LOADED);
+                m_cacheGeneration = update.generation;
+                m_requestState.compare_exchange_strong(state,
+                        packedState(update.generation, STATE_TRACK_LOADED),
+                        std::memory_order_release,
+                        std::memory_order_relaxed);
             } else {
                 DEBUG_ASSERT(update.status == TRACK_UNLOADED);
-                // This message could be processed later when a new
-                // track is already loading! In this case the TRACK_LOADED will
-                // be the very next status update.
-                if (!m_state.testAndSetRelease(STATE_TRACK_UNLOADING, STATE_IDLE)) {
-                    DEBUG_ASSERT(
-                            atomicLoadRelaxed(m_state) == STATE_TRACK_LOADING ||
-                            atomicLoadRelaxed(m_state) == STATE_IDLE);
+                if (requestState(state) == STATE_TRACK_UNLOADING ||
+                        requestState(state) == STATE_TRACK_LOADING) {
+                    freeAllChunks();
+                    m_readableFrameIndexRange = mixxx::IndexRange();
+                    m_cacheGeneration = update.generation;
+                    m_requestState.compare_exchange_strong(state,
+                            packedState(update.generation, STATE_IDLE),
+                            std::memory_order_release,
+                            std::memory_order_relaxed);
                 }
             }
         }
@@ -334,7 +359,7 @@ CachingReader::ReadResult CachingReader::read(SINT startSample,
     }
 
     // If no track is loaded, don't do anything.
-    if (atomicLoadRelaxed(m_state) != STATE_TRACK_LOADED) {
+    if (requestState(m_requestState.load(std::memory_order_acquire)) != STATE_TRACK_LOADED) {
         return ReadResult::UNAVAILABLE;
     }
 
@@ -358,6 +383,11 @@ CachingReader::ReadResult CachingReader::read(SINT startSample,
     // Process new messages from the reader thread before looking up
     // the first chunk and to update m_readableFrameIndexRange
     process();
+    const auto state = m_requestState.load(std::memory_order_acquire);
+    if (requestState(state) != STATE_TRACK_LOADED ||
+            stateGeneration(state) != m_cacheGeneration) {
+        return ReadResult::UNAVAILABLE;
+    }
 
     auto remainingFrameIndexRange =
             mixxx::IndexRange::forward(
@@ -540,7 +570,9 @@ CachingReader::ReadResult CachingReader::read(SINT startSample,
 
 void CachingReader::hintAndMaybeWake(const HintVector& hintList) {
     // If no file is loaded, skip.
-    if (atomicLoadRelaxed(m_state) != STATE_TRACK_LOADED) {
+    const auto state = m_requestState.load(std::memory_order_acquire);
+    if (requestState(state) != STATE_TRACK_LOADED ||
+            stateGeneration(state) != m_cacheGeneration) {
         return;
     }
 
@@ -596,6 +628,7 @@ void CachingReader::hintAndMaybeWake(const HintVector& hintList) {
                 // Do not insert the allocated chunk into the MRU/LRU list,
                 // because it will be handed over to the worker immediately
                 CachingReaderChunkReadRequest request;
+                request.generation = stateGeneration(state);
                 request.giveToWorker(pChunk);
                 if (kLogger.traceEnabled()) {
                     kLogger.trace()

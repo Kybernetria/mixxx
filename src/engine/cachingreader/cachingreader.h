@@ -1,11 +1,11 @@
 #pragma once
 
 #include <QAtomicInt>
-#include <QHash>
 #include <QList>
 #include <QVarLengthArray>
 #include <QVector>
-#include <list>
+#include <atomic>
+#include <vector>
 
 #include "engine/cachingreader/cachingreaderworker.h"
 #include "preferences/usersettings.h"
@@ -121,9 +121,9 @@ class CachingReader : public QObject {
     // processed in the work thread, so the reader must be woken up via wake()
     // for this to take effect.
 #ifdef __STEM__
-    void newTrack(TrackPointer pTrack, mixxx::StemChannelSelection stemMask = {});
+    quint64 newTrack(TrackPointer pTrack, mixxx::StemChannelSelection stemMask = {});
 #else
-    void newTrack(TrackPointer pTrack);
+    quint64 newTrack(TrackPointer pTrack);
 #endif
 
     void setScheduler(EngineWorkerScheduler* pScheduler) {
@@ -132,15 +132,18 @@ class CachingReader : public QObject {
 
   signals:
     // Emitted once a new track is loaded and ready to be read from.
-    void trackLoading();
+    void trackLoading(quint64 generation);
     void trackLoaded(TrackPointer pTrack,
             mixxx::audio::SampleRate trackSampleRate,
             mixxx::audio::ChannelCount trackChannelCount,
-            mixxx::audio::FramePos trackNumFrame);
-    void trackLoadFailed(TrackPointer pTrack, const QString& reason);
+            mixxx::audio::FramePos trackNumFrame,
+            quint64 generation);
+    void trackLoadFailed(TrackPointer pTrack, const QString& reason, quint64 generation);
 
   private:
     friend class ReadAheadManagerTest;
+    friend class CachingReaderGenerationTest;
+    friend class EngineBufferGenerationTest;
 
     const UserSettingsPointer m_pConfig;
 
@@ -180,18 +183,29 @@ class CachingReader : public QObject {
         STATE_TRACK_UNLOADING,
         STATE_TRACK_LOADED,
     };
-    QAtomicInt m_state;
+    static constexpr quint64 kStateMask = 3;
+    static constexpr quint64 packedState(quint64 generation, State state) {
+        return (generation << 2) | state;
+    }
+    static constexpr quint64 stateGeneration(quint64 packed) {
+        return packed >> 2;
+    }
+    static constexpr State requestState(quint64 packed) {
+        return static_cast<State>(packed & kStateMask);
+    }
+    quint64 beginTrackRequest(bool loading);
+    static_assert(std::atomic<quint64>::is_always_lock_free);
+    std::atomic<quint64> m_requestState{packedState(0, STATE_IDLE)};
+    quint64 m_cacheGeneration = 0;
 
     // Keeps track of all CachingReaderChunks we've allocated.
     QVector<CachingReaderChunkForOwner*> m_chunks;
 
-    // List of free chunks. Linked list so that we have constant time insertions
-    // and deletions. Iteration is not necessary.
-    std::list<CachingReaderChunkForOwner*> m_freeChunks;
+    // AI-generated: Reserve all free-chunk slots before audio processing so
+    // cache turnover does not allocate list nodes. End of AI-generated text.
+    std::vector<CachingReaderChunkForOwner*> m_freeChunks;
 
-    // Keeps track of what CachingReaderChunks we've allocated and indexes them based on what
-    // chunk number they are allocated to.
-    QHash<int, CachingReaderChunkForOwner*> m_allocatedCachingReaderChunks;
+    std::vector<CachingReaderChunkForOwner*> m_allocatedCachingReaderChunks;
 
     // The linked list of recently-used chunks.
     CachingReaderChunkForOwner* m_mruCachingReaderChunk;

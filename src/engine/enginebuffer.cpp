@@ -535,7 +535,11 @@ bool EngineBuffer::isReverse() const {
 }
 
 // WARNING: Always called from the EngineWorker thread pool
-void EngineBuffer::slotTrackLoading() {
+void EngineBuffer::slotTrackLoading(quint64 generation) {
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
+    if (generation != m_readerRequestGeneration) {
+        return;
+    }
     m_pMemoryCueControl->invalidateTrack();
     // Pause EngineBuffer from processing frames
     m_pause.lock();
@@ -550,10 +554,11 @@ void EngineBuffer::slotTrackLoading() {
 }
 
 void EngineBuffer::loadFakeTrack(TrackPointer pTrack, bool bPlay) {
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
     if (bPlay) {
         m_playButton->set((double)bPlay);
     }
-    slotTrackLoaded(pTrack,
+    applyTrackLoaded(pTrack,
             pTrack->getSampleRate(),
             pTrack->getChannels(),
             mixxx::audio::FramePos::fromEngineSamplePos(
@@ -564,8 +569,19 @@ void EngineBuffer::loadFakeTrack(TrackPointer pTrack, bool bPlay) {
 void EngineBuffer::slotTrackLoaded(TrackPointer pTrack,
         mixxx::audio::SampleRate trackSampleRate,
         mixxx::audio::ChannelCount trackChannelCount,
-        mixxx::audio::FramePos trackNumFrame) {
+        mixxx::audio::FramePos trackNumFrame,
+        quint64 generation) {
     const auto notificationLock = lockMutex(&m_trackNotificationMutex);
+    if (generation != m_readerRequestGeneration) {
+        return;
+    }
+    applyTrackLoaded(std::move(pTrack), trackSampleRate, trackChannelCount, trackNumFrame);
+}
+
+void EngineBuffer::applyTrackLoaded(TrackPointer pTrack,
+        mixxx::audio::SampleRate trackSampleRate,
+        mixxx::audio::ChannelCount trackChannelCount,
+        mixxx::audio::FramePos trackNumFrame) {
     if (kLogger.traceEnabled()) {
         kLogger.trace() << "slotTrackLoaded" << getGroup();
     }
@@ -630,14 +646,19 @@ void EngineBuffer::slotTrackLoaded(TrackPointer pTrack,
 
 // WARNING: Always called from the EngineWorker thread pool
 void EngineBuffer::slotTrackLoadFailed(TrackPointer pTrack,
-        const QString& reason) {
+        const QString& reason,
+        quint64 generation) {
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
+    if (generation != m_readerRequestGeneration) {
+        return;
+    }
     m_iTrackLoading = 0;
     m_pChannelToCloneFrom = nullptr;
 
     // Loading of a new track failed.
     // eject the currently loaded track (the old Track) as well
     ejectTrack();
-    emit trackLoadFailed(pTrack, reason);
+    emit trackLoadFailed(pTrack, reason, m_readerRequestGeneration);
 }
 
 void EngineBuffer::ejectTrack() {
@@ -681,7 +702,7 @@ void EngineBuffer::ejectTrack() {
     m_pause.unlock();
 
     // Close open file handles by unloading the current track
-    m_pReader->newTrack(TrackPointer());
+    m_readerRequestGeneration = m_pReader->newTrack(TrackPointer());
 
     if (pOldTrack) {
         notifyTrackLoaded(TrackPointer(), pOldTrack);
@@ -696,6 +717,7 @@ void EngineBuffer::ejectTrack() {
 
 void EngineBuffer::notifyTrackLoaded(
         TrackPointer pNewTrack, TrackPointer pOldTrack) {
+    const auto generation = m_readerRequestGeneration;
     m_pRateControl->resetPositionScratchController();
 
     if (pOldTrack) {
@@ -735,7 +757,7 @@ void EngineBuffer::notifyTrackLoaded(
     }
 
     // Inform BaseTrackPlayer via a queued connection
-    emit trackLoaded(pNewTrack, pOldTrack);
+    emit trackLoaded(pNewTrack, pOldTrack, generation);
 }
 
 void EngineBuffer::slotPassthroughChanged(double enabled) {
@@ -1702,15 +1724,16 @@ void EngineBuffer::loadTrack(TrackPointer pTrack,
         bool play,
         EngineChannel* pChannelToCloneFrom) {
 #endif
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
     if (pTrack) {
         // Signal to the reader to load the track. The reader will respond with
         // trackLoading and then either with trackLoaded or trackLoadFailed signals.
         m_bPlayAfterLoading = play;
 #ifdef __STEM__
-        m_pReader->newTrack(pTrack, stemMask);
+        m_readerRequestGeneration = m_pReader->newTrack(pTrack, stemMask);
         m_stemMask = stemMask;
 #else
-        m_pReader->newTrack(pTrack);
+        m_readerRequestGeneration = m_pReader->newTrack(pTrack);
 #endif
         atomicStoreRelaxed(m_pChannelToCloneFrom, pChannelToCloneFrom);
     } else {
@@ -1732,6 +1755,11 @@ bool EngineBuffer::isTrackLoaded() const {
 TrackPointer EngineBuffer::getLoadedTrack() const {
     const auto notificationLock = lockMutex(&m_trackNotificationMutex);
     return m_pCurrentTrack;
+}
+
+bool EngineBuffer::isCurrentTrackRequest(quint64 generation) const {
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
+    return generation == m_readerRequestGeneration;
 }
 
 mixxx::audio::FramePos EngineBuffer::getExactPlayPos() const {

@@ -588,7 +588,11 @@ void BaseTrackPlayerImpl::slotLoadTrack(TrackPointer pNewTrack,
 #endif
 }
 
-void BaseTrackPlayerImpl::slotLoadFailed(TrackPointer pTrack, const QString& reason) {
+void BaseTrackPlayerImpl::slotLoadFailed(
+        TrackPointer pTrack, const QString& reason, quint64 generation) {
+    if (!m_pChannel->getEngineBuffer()->isCurrentTrackRequest(generation)) {
+        return;
+    }
     // Note: This slot can be a load failure from the current track or a
     // a delayed signal from a previous load.
     // We have probably received a slotTrackLoaded signal, of an old track that
@@ -596,7 +600,7 @@ void BaseTrackPlayerImpl::slotLoadFailed(TrackPointer pTrack, const QString& rea
     // We must unload the track m_pLoadedTrack as well
     if (pTrack == m_pLoadedTrack) {
         qDebug() << "Failed to load track" << pTrack->getFileInfo() << reason;
-        slotTrackLoaded(TrackPointer(), pTrack);
+        slotTrackLoaded(TrackPointer(), pTrack, generation);
     } else if (pTrack) {
         qDebug() << "Stray failed to load track" << pTrack->getFileInfo() << reason;
     } else {
@@ -619,7 +623,11 @@ void BaseTrackPlayerImpl::slotLoadFailed(TrackPointer pTrack, const QString& rea
 }
 
 void BaseTrackPlayerImpl::slotTrackLoaded(TrackPointer pNewTrack,
-                                          TrackPointer pOldTrack) {
+        TrackPointer pOldTrack,
+        quint64 generation) {
+    if (!m_pChannel->getEngineBuffer()->isCurrentTrackRequest(generation)) {
+        return;
+    }
     //qDebug() << "BaseTrackPlayerImpl::slotTrackLoaded" << pNewTrack.get() << pOldTrack.get();
     if (!pNewTrack &&
             pOldTrack &&

@@ -81,7 +81,7 @@ class EngineDeck : public EngineChannel, public AudioDestination {
     void slotPassthroughToggle(double v);
     void slotPassthroughChangeRequest(double v);
 #ifdef __STEM__
-    void slotTrackLoaded(TrackPointer pNewTrack, TrackPointer);
+    void slotTrackLoaded(TrackPointer pNewTrack, TrackPointer, quint64 generation);
 #endif
 
   private:

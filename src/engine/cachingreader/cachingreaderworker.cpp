@@ -38,6 +38,10 @@ ReaderStatusUpdate CachingReaderWorker::processReadRequest(
         const CachingReaderChunkReadRequest& request) {
     CachingReaderChunk* pChunk = request.chunk;
     DEBUG_ASSERT(pChunk);
+    if (request.generation != m_activeGeneration ||
+            request.generation != m_requestedGeneration.load(std::memory_order_acquire)) {
+        return ReaderStatusUpdate::readDiscarded(pChunk, request.generation);
+    }
 
     // Before trying to read any data we need to check if the audio source
     // is available and if any audio data that is needed by the chunk is
@@ -47,7 +51,10 @@ ReaderStatusUpdate CachingReaderWorker::processReadRequest(
             chunkFrameIndexRange.isSubrangeOf(m_pAudioSource->frameIndexRange()));
     if (chunkFrameIndexRange.empty()) {
         ReaderStatusUpdate result;
-        result.init(CHUNK_READ_INVALID, pChunk, m_pAudioSource ? m_pAudioSource->frameIndexRange() : mixxx::IndexRange());
+        result.init(CHUNK_READ_INVALID,
+                pChunk,
+                m_pAudioSource ? m_pAudioSource->frameIndexRange() : mixxx::IndexRange(),
+                request.generation);
         return result;
     }
 
@@ -89,25 +96,35 @@ ReaderStatusUpdate CachingReaderWorker::processReadRequest(
     }
 
     ReaderStatusUpdate result;
-    result.init(status, pChunk, m_pAudioSource ? m_pAudioSource->frameIndexRange() : mixxx::IndexRange());
+    result.init(status,
+            pChunk,
+            m_pAudioSource ? m_pAudioSource->frameIndexRange() : mixxx::IndexRange(),
+            request.generation);
     return result;
 }
 
 // WARNING: Always called from a different thread (GUI)
 #ifdef __STEM__
-void CachingReaderWorker::newTrack(TrackPointer pTrack, mixxx::StemChannelSelection stemMask) {
+void CachingReaderWorker::newTrack(TrackPointer pTrack,
+        mixxx::StemChannelSelection stemMask,
+        quint64 generation) {
 #else
-void CachingReaderWorker::newTrack(TrackPointer pTrack) {
+void CachingReaderWorker::newTrack(TrackPointer pTrack, quint64 generation) {
 #endif
     {
         const auto locker = lockMutex(&m_newTrackMutex);
+        if (generation <= m_requestedGeneration.load(std::memory_order_relaxed)) {
+            return;
+        }
 #ifdef __STEM__
         m_pNewTrack = NewTrackRequest{
-                pTrack,
-                stemMask};
+                std::move(pTrack),
+                stemMask,
+                generation};
 #else
-        m_pNewTrack = pTrack;
+        m_pNewTrack = NewTrackRequest{std::move(pTrack), generation};
 #endif
+        m_requestedGeneration.store(generation, std::memory_order_release);
         m_newTrackAvailable.storeRelease(1);
     }
     workReady();
@@ -125,24 +142,21 @@ void CachingReaderWorker::run() {
         // Request is initialized by reading from FIFO
         CachingReaderChunkReadRequest request;
         if (m_newTrackAvailable.loadAcquire()) {
-#ifdef __STEM__
             NewTrackRequest pLoadTrack;
-#else
-            TrackPointer pLoadTrack;
-#endif
             { // locking scope
                 const auto locker = lockMutex(&m_newTrackMutex);
                 pLoadTrack = m_pNewTrack;
                 m_newTrackAvailable.storeRelease(0);
             } // implicitly unlocks the mutex
+            m_activeGeneration = pLoadTrack.generation;
 #ifdef __STEM__
             if (pLoadTrack.track) {
                 // in this case the engine is still running with the old track
                 loadTrack(pLoadTrack.track, pLoadTrack.stemMask);
 #else
-            if (pLoadTrack) {
+            if (pLoadTrack.track) {
                 // in this case the engine is still running with the old track
-                loadTrack(pLoadTrack);
+                loadTrack(pLoadTrack.track);
 #endif
             } else {
                 // here, the engine is already stopped
@@ -151,7 +165,9 @@ void CachingReaderWorker::run() {
         } else if (m_pChunkReadRequestFIFO->read(&request, 1) == 1) {
             // Read the requested chunk and send the result
             const ReaderStatusUpdate update = processReadRequest(request);
-            m_pReaderStatusFIFO->writeBlocking(&update, 1);
+            if (!publishStatus(update)) {
+                break;
+            }
         } else {
             Event::end(m_tag);
             m_semaRun.acquire();
@@ -160,16 +176,31 @@ void CachingReaderWorker::run() {
     }
 }
 
-void CachingReaderWorker::discardAllPendingRequests() {
-    CachingReaderChunkReadRequest request;
-    while (m_pChunkReadRequestFIFO->read(&request, 1) == 1) {
-        const auto update = ReaderStatusUpdate::readDiscarded(request.chunk);
-        m_pReaderStatusFIFO->writeBlocking(&update, 1);
+bool CachingReaderWorker::publishStatus(const ReaderStatusUpdate& update) {
+    while (!m_stop.loadAcquire()) {
+        if (m_pReaderStatusFIFO->write(&update, 1) == 1) {
+            return true;
+        }
+        QThread::msleep(1);
     }
+    return false;
 }
 
-void CachingReaderWorker::closeAudioSource() {
-    discardAllPendingRequests();
+bool CachingReaderWorker::discardAllPendingRequests() {
+    CachingReaderChunkReadRequest request;
+    while (m_pChunkReadRequestFIFO->read(&request, 1) == 1) {
+        const auto update = ReaderStatusUpdate::readDiscarded(request.chunk, request.generation);
+        if (!publishStatus(update)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CachingReaderWorker::closeAudioSource() {
+    if (!discardAllPendingRequests()) {
+        return false;
+    }
 
     if (m_pAudioSource) {
         // Closes open file handles of the old track.
@@ -177,16 +208,16 @@ void CachingReaderWorker::closeAudioSource() {
         m_pAudioSource.reset();
     }
 
-    // This function has to be called with the engine stopped only
-    // to avoid collecting new requests for the old track
-    DEBUG_ASSERT(!m_pChunkReadRequestFIFO->readAvailable());
+    return true;
 }
 
 void CachingReaderWorker::unloadTrack() {
-    closeAudioSource();
+    if (!closeAudioSource()) {
+        return;
+    }
 
-    const auto update = ReaderStatusUpdate::trackUnloaded();
-    m_pReaderStatusFIFO->writeBlocking(&update, 1);
+    const auto update = ReaderStatusUpdate::trackUnloaded(m_activeGeneration);
+    publishStatus(update);
 }
 
 #ifdef __STEM__
@@ -197,20 +228,26 @@ void CachingReaderWorker::loadTrack(const TrackPointer& pTrack) {
 #endif
     // This emit is directly connected and returns synchronized
     // after the engine has been stopped.
-    emit trackLoading();
+    emit trackLoading(m_activeGeneration);
 
-    closeAudioSource();
+    if (m_activeGeneration != m_requestedGeneration.load(std::memory_order_acquire) ||
+            !closeAudioSource()) {
+        return;
+    }
 
     if (!pTrack->getFileInfo().checkFileExists()) {
         kLogger.warning()
                 << m_group
                 << "File not found"
                 << pTrack->getFileInfo();
-        const auto update = ReaderStatusUpdate::trackUnloaded();
-        m_pReaderStatusFIFO->writeBlocking(&update, 1);
+        const auto update = ReaderStatusUpdate::trackUnloaded(m_activeGeneration);
+        if (!publishStatus(update)) {
+            return;
+        }
         emit trackLoadFailed(pTrack,
                 tr("The file '%1' could not be found.")
-                        .arg(QDir::toNativeSeparators(pTrack->getLocation())));
+                        .arg(QDir::toNativeSeparators(pTrack->getLocation())),
+                m_activeGeneration);
         return;
     }
 
@@ -220,16 +257,23 @@ void CachingReaderWorker::loadTrack(const TrackPointer& pTrack) {
     config.setStemMask(stemMask);
 #endif
     m_pAudioSource = SoundSourceProxy(pTrack).openAudioSource(config);
+    if (m_activeGeneration != m_requestedGeneration.load(std::memory_order_acquire)) {
+        m_pAudioSource.reset();
+        return;
+    }
     if (!m_pAudioSource) {
         kLogger.warning()
                 << m_group
                 << "Failed to open file"
                 << pTrack->getFileInfo();
-        const auto update = ReaderStatusUpdate::trackUnloaded();
-        m_pReaderStatusFIFO->writeBlocking(&update, 1);
+        const auto update = ReaderStatusUpdate::trackUnloaded(m_activeGeneration);
+        if (!publishStatus(update)) {
+            return;
+        }
         emit trackLoadFailed(pTrack,
                 tr("The file '%1' could not be loaded.")
-                        .arg(QDir::toNativeSeparators(pTrack->getLocation())));
+                        .arg(QDir::toNativeSeparators(pTrack->getLocation())),
+                m_activeGeneration);
         return;
     }
 
@@ -242,14 +286,17 @@ void CachingReaderWorker::loadTrack(const TrackPointer& pTrack) {
         // Cache the channel count before we reset the AudioSourcePointer
         const int chCount = static_cast<int>(m_pAudioSource->getSignalInfo().getChannelCount());
         m_pAudioSource.reset(); // Close open file handles
-        const auto update = ReaderStatusUpdate::trackUnloaded();
-        m_pReaderStatusFIFO->writeBlocking(&update, 1);
+        const auto update = ReaderStatusUpdate::trackUnloaded(m_activeGeneration);
+        if (!publishStatus(update)) {
+            return;
+        }
         emit trackLoadFailed(pTrack,
                 tr("The file '%1' could not be loaded because it contains %2 "
                    "channels, and only 1 to %3 are supported.")
                         .arg(QDir::toNativeSeparators(pTrack->getLocation()),
                                 QString::number(chCount),
-                                QString::number(m_maxSupportedChannel)));
+                                QString::number(m_maxSupportedChannel)),
+                m_activeGeneration);
         return;
     }
 
@@ -262,11 +309,14 @@ void CachingReaderWorker::loadTrack(const TrackPointer& pTrack) {
                 << m_group
                 << "Failed to open empty file"
                 << pTrack->getFileInfo();
-        const auto update = ReaderStatusUpdate::trackUnloaded();
-        m_pReaderStatusFIFO->writeBlocking(&update, 1);
+        const auto update = ReaderStatusUpdate::trackUnloaded(m_activeGeneration);
+        if (!publishStatus(update)) {
+            return;
+        }
         emit trackLoadFailed(pTrack,
                 tr("The file '%1' is empty and could not be loaded.")
-                        .arg(QDir::toNativeSeparators(pTrack->getLocation())));
+                        .arg(QDir::toNativeSeparators(pTrack->getLocation())),
+                m_activeGeneration);
         return;
     }
 
@@ -280,8 +330,10 @@ void CachingReaderWorker::loadTrack(const TrackPointer& pTrack) {
 
     const auto update =
             ReaderStatusUpdate::trackLoaded(
-                    m_pAudioSource->frameIndexRange());
-    m_pReaderStatusFIFO->writeBlocking(&update, 1);
+                    m_pAudioSource->frameIndexRange(), m_activeGeneration);
+    if (!publishStatus(update)) {
+        return;
+    }
 
     // Emit that the track is loaded.
 
@@ -293,15 +345,12 @@ void CachingReaderWorker::loadTrack(const TrackPointer& pTrack) {
         m_firstSoundFrameToVerify = pN60dBSound->getPosition();
     }
 
-    // The engine must not request any chunks before receiving the
-    // trackLoaded() signal
-    DEBUG_ASSERT(!m_pChunkReadRequestFIFO->readAvailable());
-
     emit trackLoaded(
             pTrack,
             m_pAudioSource->getSignalInfo().getSampleRate(),
             m_pAudioSource->getSignalInfo().getChannelCount(),
-            mixxx::audio::FramePos(m_pAudioSource->frameLength()));
+            mixxx::audio::FramePos(m_pAudioSource->frameLength()),
+            m_activeGeneration);
 }
 
 void CachingReaderWorker::quitWait() {
