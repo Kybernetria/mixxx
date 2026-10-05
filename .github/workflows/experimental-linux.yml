@@ -149,7 +149,7 @@ jobs:
   sanitizer-tests:
     if: github.repository_owner != 'mixxxdj' && github.event.repository.fork == true
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -172,6 +172,8 @@ jobs:
           -DBUILD_TESTING=ON -DBUILD_BENCH=OFF
           -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
           -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_CXX_FLAGS_DEBUG="-g1"
+          -DCMAKE_C_FLAGS_DEBUG="-g1"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
           -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
       - name: Build sanitizer tests
@@ -187,7 +189,7 @@ jobs:
           XDG_STATE_HOME: ${{ runner.temp }}/experimental-home-sanitizers/state
           QT_QPA_PLATFORM: offscreen
           CTEST_OUTPUT_ON_FAILURE: 1
-          CTEST_PARALLEL_LEVEL: 1
+          CTEST_PARALLEL_LEVEL: 2
           GTEST_COLOR: 1
         run: |
           mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
