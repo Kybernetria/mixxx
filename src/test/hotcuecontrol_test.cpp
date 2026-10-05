@@ -95,6 +95,13 @@ class HotcueControlTest : public BaseSignalPathTest {
         ProcessBuffer();
     }
 
+    void expectHotcue1StatusAfterCallback(HotcueControl::Status status) {
+        auto* pCueControl = m_pChannel1->getEngineBuffer()->m_pCueControl;
+        EXPECT_EQ(status, pCueControl->m_hotcueControls[0]->getStatus());
+        pCueControl->projectHotcueStatuses();
+        EXPECT_DOUBLE_EQ(static_cast<double>(status), m_pHotcue1Status->get());
+    }
+
     std::unique_ptr<ControlProxy> m_pPlay;
     std::unique_ptr<ControlProxy> m_pBeatloopActivate;
     std::unique_ptr<ControlProxy> m_pBeatloopSize;
@@ -1137,7 +1144,7 @@ TEST_F(HotcueControlTest, SavedLoopToggleDoesNotSeek) {
     EXPECT_NEAR(beforeLoopPosition.value(), currentFramePosition().value(), 1024);
 
     // Check that the previous seek disabled the loop
-    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Set), m_pHotcue1Status->get());
+    expectHotcue1StatusAfterCallback(HotcueControl::Status::Set);
     EXPECT_FRAMEPOS_EQ_CONTROL(loopStartPosition, m_pHotcue1Position);
     EXPECT_FRAMEPOS_EQ_CONTROL(loopStartPosition + loopLengthFrames, m_pHotcue1EndPosition);
 
@@ -1205,7 +1212,7 @@ TEST_F(HotcueControlTest, SavedLoopActivate) {
     EXPECT_NEAR(beforeLoopPosition.value(), currentFramePosition().value(), 1000);
 
     // Check that the previous seek disabled the loop
-    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Set), m_pHotcue1Status->get());
+    expectHotcue1StatusAfterCallback(HotcueControl::Status::Set);
     EXPECT_FRAMEPOS_EQ_CONTROL(loopStartPosition, m_pHotcue1Position);
     EXPECT_FRAMEPOS_EQ_CONTROL(loopStartPosition + loopLengthFrames, m_pHotcue1EndPosition);
 
@@ -1223,7 +1230,7 @@ TEST_F(HotcueControlTest, SavedLoopActivate) {
     ProcessBuffer();
 
     // Check that the previous seek disabled the loop
-    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Set), m_pHotcue1Status->get());
+    expectHotcue1StatusAfterCallback(HotcueControl::Status::Set);
     EXPECT_FRAMEPOS_EQ_CONTROL(loopStartPosition, m_pHotcue1Position);
     EXPECT_FRAMEPOS_EQ_CONTROL(loopStartPosition + loopLengthFrames, m_pHotcue1EndPosition);
 
