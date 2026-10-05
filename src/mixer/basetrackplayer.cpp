@@ -629,11 +629,9 @@ void BaseTrackPlayerImpl::slotTrackLoaded(TrackPointer pNewTrack,
         return;
     }
     //qDebug() << "BaseTrackPlayerImpl::slotTrackLoaded" << pNewTrack.get() << pOldTrack.get();
-    if (!pNewTrack &&
-            pOldTrack &&
-            pOldTrack == m_pLoadedTrack) {
+    if (!pNewTrack) {
         // eject Track
-        unloadTrack();
+        pOldTrack = unloadTrack();
 
         // Causes the track's data to be saved back to the library database and
         // for all the widgets to change the track and update themselves.

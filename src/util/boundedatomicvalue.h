@@ -6,12 +6,17 @@
 #include <cstring>
 #include <type_traits>
 
+/// AI-generated documentation.
 /// Single-writer, multi-reader scalar snapshot. Publication never waits; a
 /// reader gives up after eight attempts. All payload words are atomic, so a
 /// failed snapshot does not introduce the data race of a plain-data seqlock.
 /// Sequentially consistent word operations preserve the sequence/payload order
-/// across platforms. T must contain no owned resources or pointers to mutable
-/// data. This is intentionally not a replacement for ControlValueAtomic.
+/// across platforms. T must contain no owned resources. Borrowed identity
+/// pointers require an externally guaranteed lifetime beyond publication and
+/// consumption. This helper never owns or dereferences pointers; callers must
+/// independently synchronize access to the pointed-to objects. This is
+/// intentionally not a replacement for ControlValueAtomic.
+/// End AI-generated documentation.
 template<typename T>
 class BoundedAtomicValue {
     static_assert(std::is_trivially_copyable_v<T>);

@@ -53,6 +53,18 @@ class EngineBufferGenerationTest : public BaseSignalPathTest {
     bool loading() const {
         return engine()->m_iTrackLoading != 0;
     }
+
+    TrackPointer startPendingLoad() {
+        engine()->m_pReader->m_worker.quitWait();
+        const auto pendingTrack = Track::newTemporary(
+                getTestDir().filePath(QStringLiteral("sine-30.wav")));
+        m_pMixerDeck1->slotLoadTrack(pendingTrack,
+#ifdef __STEM__
+                mixxx::StemChannelSelection(),
+#endif
+                false);
+        return pendingTrack;
+    }
 };
 
 TEST_F(EngineBufferGenerationTest, StaleCallbacksCannotResurrectAnEjectedTrack) {
@@ -116,4 +128,43 @@ TEST_F(EngineBufferGenerationTest, StaleGuiEjectCannotClearAReloadOfTheSameTrack
     EXPECT_EQ(sameTrack, m_pMixerDeck1->getLoadedTrack());
     EXPECT_EQ(sameTrack, engine()->getLoadedTrack());
     EXPECT_TRUE(engine()->isTrackLoaded());
+}
+
+TEST_F(EngineBufferGenerationTest, EjectDuringReplacementLoadClearsPendingGuiTrack) {
+    const auto oldTrack = m_pMixerDeck1->loadFakeTrack(false, 120);
+    const auto pendingTrack = startPendingLoad();
+    ASSERT_EQ(pendingTrack, m_pMixerDeck1->getLoadedTrack());
+    ASSERT_EQ(oldTrack, engine()->getLoadedTrack());
+    const auto pendingGeneration = currentRequestGeneration();
+    TrackPointer unloadedTrack;
+    const auto connection = QObject::connect(m_pMixerDeck1.get(),
+            &BaseTrackPlayerImpl::loadingTrack,
+            m_pMixerDeck1.get(),
+            [&unloadedTrack](TrackPointer, TrackPointer oldGuiTrack) {
+                unloadedTrack = std::move(oldGuiTrack);
+            });
+
+    m_pMixerDeck1->slotEjectTrack(1);
+
+    EXPECT_NE(pendingGeneration, currentRequestGeneration());
+    EXPECT_FALSE(engine()->getLoadedTrack());
+    EXPECT_FALSE(m_pMixerDeck1->getLoadedTrack());
+    EXPECT_EQ(pendingTrack, unloadedTrack);
+    EXPECT_EQ(0.0, ControlObject::get(ConfigKey(m_sGroup1, "duration")));
+    EXPECT_EQ(0.0, ControlObject::get(ConfigKey(m_sGroup1, "file_bpm")));
+    QObject::disconnect(connection);
+}
+
+TEST_F(EngineBufferGenerationTest, EjectDuringInitialLoadClearsPendingGuiTrack) {
+    ASSERT_FALSE(engine()->getLoadedTrack());
+    const auto pendingTrack = startPendingLoad();
+    ASSERT_EQ(pendingTrack, m_pMixerDeck1->getLoadedTrack());
+    const auto pendingGeneration = currentRequestGeneration();
+
+    m_pMixerDeck1->slotEjectTrack(1);
+
+    EXPECT_NE(pendingGeneration, currentRequestGeneration());
+    EXPECT_FALSE(engine()->getLoadedTrack());
+    EXPECT_FALSE(m_pMixerDeck1->getLoadedTrack());
+    EXPECT_FALSE(engine()->isTrackLoaded());
 }

@@ -1,6 +1,7 @@
 #include "engine/enginebuffer.h"
 
 #include <QtDebug>
+#include <QScopedValueRollback>
 #include <cmath>
 
 #include "control/controllinpotmeter.h"
@@ -109,8 +110,6 @@ EngineBuffer::EngineBuffer(const QString& group,
 {
     // This should be a static assertion, but isValid() is not constexpr.
     DEBUG_ASSERT(kInitialPlayPosition.isValid());
-
-    m_queuedSeek.setValue(kNoQueuedSeek);
 
     // zero out crossfade buffer
     SampleUtil::clear(m_pCrossfadeBuffer, kMaxEngineFrames * mixxx::kMaxEngineChannelInputCount);
@@ -413,14 +412,12 @@ void EngineBuffer::setEngineMixer(EngineMixer* pEngineMixer) {
 
 void EngineBuffer::queueNewPlaypos(mixxx::audio::FramePos position, enum SeekRequest seekType) {
     // All seeks need to be done in the Engine thread so queue it up.
-    // Write the position before the seek type, to reduce a possible race
-    // condition effect
     VERIFY_OR_DEBUG_ASSERT(seekType != SEEK_PHASE) {
         // SEEK_PHASE with a position is not supported
         // use SEEK_STANDARD for that
         seekType = SEEK_STANDARD;
     }
-    m_queuedSeek.setValue({position, seekType});
+    m_queuedSeek.publish({position, seekType});
 }
 
 void EngineBuffer::requestSyncPhase(bool liveTimeline) {
@@ -582,6 +579,7 @@ void EngineBuffer::applyTrackLoaded(TrackPointer pTrack,
         mixxx::audio::SampleRate trackSampleRate,
         mixxx::audio::ChannelCount trackChannelCount,
         mixxx::audio::FramePos trackNumFrame) {
+    EngineChannel* pChannelToCloneFrom = m_pChannelToCloneFrom.fetchAndStoreRelaxed(nullptr);
     if (kLogger.traceEnabled()) {
         kLogger.trace() << "slotTrackLoaded" << getGroup();
     }
@@ -624,7 +622,7 @@ void EngineBuffer::applyTrackLoaded(TrackPointer pTrack,
 
     m_pReplayGain->set(pTrack->getReplayGain().getRatio());
 
-    m_queuedSeek.setValue(kNoQueuedSeek);
+    m_queuedSeek.publish(kNoQueuedSeek);
 
     // Reset the pitch value for the new track.
     m_pause.unlock();
@@ -633,9 +631,8 @@ void EngineBuffer::applyTrackLoaded(TrackPointer pTrack,
 
     // Check if we are cloning another channel before doing any seeking.
     // This replaces m_queuedSeek populated form CueControl
-    EngineChannel* pChannel = atomicLoadRelaxed(m_pChannelToCloneFrom);
-    if (pChannel) {
-        m_queuedSeek.setValue(kCloneSeek);
+    if (pChannelToCloneFrom) {
+        m_queuedSeek.publish({mixxx::audio::kInvalidFramePos, SEEK_CLONE, pChannelToCloneFrom});
         m_iSeekPhaseQueued = 0;
     }
 
@@ -697,19 +694,14 @@ void EngineBuffer::ejectTrack() {
 
     m_pReplayGain->set(0.0);
 
-    m_queuedSeek.setValue(kNoQueuedSeek);
+    m_queuedSeek.publish(kNoQueuedSeek);
 
     m_pause.unlock();
 
     // Close open file handles by unloading the current track
     m_readerRequestGeneration = m_pReader->newTrack(TrackPointer());
 
-    if (pOldTrack) {
-        notifyTrackLoaded(TrackPointer(), pOldTrack);
-    } else {
-        // When not invoking notifyTrackLoaded() call this separately
-        m_pRateControl->resetPositionScratchController();
-    }
+    notifyTrackLoaded(TrackPointer(), pOldTrack);
 
     m_iTrackLoading = 0;
     m_pChannelToCloneFrom = nullptr;
@@ -835,12 +827,15 @@ bool EngineBuffer::updateIndicatorsAndModifyPlay(bool newPlay, bool oldPlay) {
     // allow the set since it might apply to a track we are loading due to the
     // asynchrony.
     bool playPossible = true;
-    const QueuedSeek queuedSeek = m_queuedSeek.getValue();
+    decltype(m_queuedSeek)::Snapshot pending{};
+    const bool seekPending = m_queuedSeek.tryGetPending(&pending)
+            ? pending.value.seekType != SEEK_NONE
+            : m_queuedSeek.hasPending();
     const bool trackLoaded = m_pTrackLoaded->toBool();
     if ((!trackLoaded && atomicLoadRelaxed(m_iTrackLoading) == 0) ||
             (trackLoaded && atomicLoadRelaxed(m_iTrackLoading) == 0 &&
                     m_playPos >= getTrackEndPosition() &&
-                    queuedSeek.seekType == SEEK_NONE) ||
+                    !seekPending) ||
             m_pPassthroughEnabled->toBool()) {
         // play not possible
         playPossible = false;
@@ -1469,7 +1464,14 @@ void EngineBuffer::processSyncRequests() {
 void EngineBuffer::processSeek(bool paused) {
     m_previousBufferSeek = false;
 
-    QueuedSeek queuedSeek = m_queuedSeek.getValue();
+    decltype(m_queuedSeek)::Snapshot pending{};
+    QueuedSeek queuedSeek = kNoQueuedSeek;
+    if (m_queuedSeek.tryGetPending(&pending)) {
+        queuedSeek = pending.value;
+        m_queuedSeek.consume(pending);
+    } else if (m_queuedSeek.hasPending()) {
+        return;
+    }
     if (queuedSeek.seekType == SEEK_NONE && m_pendingSlipRestorePosition.isValid()) {
         queuedSeek = {m_pendingSlipRestorePosition, SEEK_SLIP_RESTORE};
 #ifdef __VINYLCONTROL__
@@ -1517,7 +1519,7 @@ void EngineBuffer::processSeek(bool paused) {
             break;
         case SEEK_CLONE: {
             // Cloning another channels position.
-            EngineChannel* pOtherChannel = m_pChannelToCloneFrom.fetchAndStoreRelaxed(nullptr);
+            EngineChannel* pOtherChannel = queuedSeek.pCloneSource;
             VERIFY_OR_DEBUG_ASSERT(pOtherChannel) {
                 return;
             }
@@ -1525,13 +1527,14 @@ void EngineBuffer::processSeek(bool paused) {
         } break;
         default:
             DEBUG_ASSERT(!"Unhandled seek request type");
-            m_queuedSeek.setValue(kNoQueuedSeek);
             return;
     }
 
     VERIFY_OR_DEBUG_ASSERT(position.isValid()) {
         return;
     }
+    const QScopedValueRollback<mixxx::audio::FramePos> processingSeek(
+            m_processingSeekPosition, position);
     m_slipTimeline = slipTimeline && !paused;
     m_liveTimeline = m_slipTimeline || (liveTimeline && !paused && m_quantize.toBool() &&
             m_pSyncControl->getSyncMode() == SyncMode::Follower);
@@ -1556,13 +1559,10 @@ void EngineBuffer::processSeek(bool paused) {
         if (kLogger.traceEnabled()) {
             kLogger.trace() << "processSeek" << getGroup() << "Seek to" << position;
         }
+        m_processingSeekPosition = position;
         setNewPlaypos(position);
         m_previousBufferSeek = true;
     }
-    // Reset the m_queuedSeek value after it has been processed in
-    // setNewPlaypos() so that the Engine Controls have always access to the
-    // position of the upcoming buffer cycle (used for loop cues)
-    m_queuedSeek.setValue(kNoQueuedSeek);
 }
 
 void EngineBuffer::postProcessLocalBpm() {
@@ -1605,12 +1605,14 @@ void EngineBuffer::postProcess(const std::size_t bufferSize) {
 }
 
 mixxx::audio::FramePos EngineBuffer::queuedSeekPosition() const {
-    const QueuedSeek queuedSeek = m_queuedSeek.getValue();
-    if (queuedSeek.seekType == SEEK_NONE) {
+    if (mixxx::AudioCallbackScope::isActive() && m_processingSeekPosition.isValid()) {
+        return m_processingSeekPosition;
+    }
+    decltype(m_queuedSeek)::Snapshot pending{};
+    if (!m_queuedSeek.tryGetPending(&pending) || pending.value.seekType == SEEK_NONE) {
         return {};
     }
-
-    return queuedSeek.position;
+    return pending.value.position;
 }
 
 void EngineBuffer::updateIndicators(double speed, std::size_t bufferSize) {

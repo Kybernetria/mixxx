@@ -9,7 +9,6 @@
 
 #include "audio/frame.h"
 #include "audio/types.h"
-#include "control/controlvalue.h"
 #include "control/pollingcontrolproxy.h"
 #include "engine/cachingreader/cachingreader.h"
 #include "engine/engineobject.h"
@@ -18,6 +17,7 @@
 #include "preferences/usersettings.h"
 #include "track/bpm.h"
 #include "track/track_decl.h"
+#include "util/audiocommandmailbox.h"
 #include "util/compatibility/qmutex.h"
 #include "util/types.h"
 
@@ -274,10 +274,12 @@ class EngineBuffer : public EngineObject {
 
   private:
     friend class EngineBufferGenerationTest;
+    friend class EngineBufferSeekMailboxTest;
 
     struct QueuedSeek {
         mixxx::audio::FramePos position;
         enum SeekRequest seekType;
+        EngineChannel* pCloneSource = nullptr;
     };
 
     // Add an engine control to the EngineBuffer
@@ -483,7 +485,8 @@ class EngineBuffer : public EngineObject {
     QAtomicInt m_iSeekPhaseQueued;
     QAtomicInt m_iEnableSyncQueued;
     QAtomicInt m_iSyncModeQueued;
-    ControlValueAtomic<QueuedSeek> m_queuedSeek;
+    mixxx::AudioCommandMailbox<QueuedSeek> m_queuedSeek{kNoQueuedSeek};
+    mixxx::audio::FramePos m_processingSeekPosition = mixxx::audio::kInvalidFramePos;
     bool m_previousBufferSeek = false;
     bool m_liveTimeline = false;
     bool m_slipTimeline = false;
@@ -491,9 +494,7 @@ class EngineBuffer : public EngineObject {
 
     QAtomicInt m_slipQuitAndAdopt;
     /// Indicates that no seek is queued
-    static constexpr QueuedSeek kNoQueuedSeek = {mixxx::audio::kInvalidFramePos, SEEK_NONE};
-    /// indicates a clone seek on a bosition from another deck
-    static constexpr QueuedSeek kCloneSeek = {mixxx::audio::kInvalidFramePos, SEEK_CLONE};
+    static constexpr QueuedSeek kNoQueuedSeek = {mixxx::audio::kInvalidFramePos, SEEK_NONE, nullptr};
     QAtomicPointer<EngineChannel> m_pChannelToCloneFrom;
 
     // Is true if the previous buffer was silent due to pausing
