@@ -1,5 +1,8 @@
 #include "engine/controls/cuecontrol.h"
 
+#include <QThread>
+#include <QTimer>
+
 #include "control/controlindicator.h"
 #include "control/controlobject.h"
 #include "control/controlpushbutton.h"
@@ -10,6 +13,7 @@
 #include "track/cueinfo.h"
 #include "track/track.h"
 #include "util/assert.h"
+#include "util/audiocallbackscope.h"
 #include "util/color/predefinedcolorpalettes.h"
 #include "util/defs.h"
 #include "vinylcontrol/defs_vinylcontrol.h"
@@ -146,10 +150,22 @@ CueControl::CueControl(const QString& group,
             this,
             &CueControl::setHotcueIndicesSortedByPositionCompress,
             Qt::DirectConnection);
+
+    m_pHotcueStatusTimer = make_parented<QTimer>(this);
+    connect(m_pHotcueStatusTimer.get(), &QTimer::timeout,
+            this, &CueControl::projectHotcueStatuses);
+    m_pHotcueStatusTimer->start(20);
 }
 
 CueControl::~CueControl() {
+    m_pHotcueStatusTimer->stop();
     qDeleteAll(m_hotcueControls);
+}
+
+void CueControl::projectHotcueStatuses() {
+    for (auto* pControl : std::as_const(m_hotcueControls)) {
+        pControl->projectStatus();
+    }
 }
 
 mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
@@ -172,15 +188,21 @@ mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
     HotcueControl* pNextJump = nullptr;
     mixxx::audio::FramePos selectedPosition;
     mixxx::audio::FramePos selectedEndPosition;
+    std::uint64_t selectedStatusToken = 0;
     // Find the first saved cue that is next to be played (either first after
     // the play position, or first before in playing in reverse)
     for (const auto& pControl : std::as_const(m_hotcueControls)) {
-        if (!isValidJumpCue(pControl)) {
+        const auto statusToken = pControl->m_statusToken.load();
+        if (pControl->m_triggerMutations.load() != 0 || !isValidJumpCue(pControl)) {
             continue;
         }
 
         const auto position = pControl->getPosition();
         const auto endPosition = pControl->getEndPosition();
+        if (pControl->m_triggerMutations.load() != 0 ||
+                statusToken != pControl->m_statusToken.load()) {
+            continue;
+        }
         bool selected = false;
         if (!reverse) {
             // Saved jumps store the position to jump from as their end position
@@ -204,6 +226,7 @@ mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
             pNextJump = pControl;
             selectedPosition = position;
             selectedEndPosition = endPosition;
+            selectedStatusToken = statusToken;
         }
     }
 
@@ -215,14 +238,15 @@ mixxx::audio::FramePos CueControl::nextTrigger(bool reverse,
                 triggerPosition,
                 *pTargetPosition,
                 revision,
+                selectedStatusToken,
                 reverse};
     }
     if (commitState && pNextJump != nullptr &&
-            pNextJump->getPosition() < pNextJump->getEndPosition() &&
-            currentPosition + lookAheadFrames > pNextJump->getEndPosition()) {
+            selectedPosition < selectedEndPosition &&
+            currentPosition + lookAheadFrames > selectedEndPosition) {
         // If the saved jump is backward, we reset the Active status after the jump
         // to prevent jumping again like a loop
-        pNextJump->setStatus(HotcueControl::Status::Set);
+        pNextJump->tryDisarm(selectedStatusToken);
     }
     return triggerPosition;
 }
@@ -241,7 +265,7 @@ void CueControl::commitTrigger(mixxx::audio::FramePos triggerPosition,
             pControl->getPosition() == decision.position &&
             pControl->getEndPosition() == decision.endPosition &&
             decision.position < decision.endPosition) {
-        pControl->setStatus(HotcueControl::Status::Set);
+        pControl->tryDisarm(decision.statusToken);
     }
 }
 
@@ -250,18 +274,19 @@ void CueControl::notifySeek(mixxx::audio::FramePos position) {
     // Iterate over all the hotcues to find saved jump. If we sought inside the
     // jump range, ensure the jump is disabled to prevent double seek
     for (const auto& pControl : std::as_const(m_hotcueControls)) {
-        if (!isValidJumpCue(pControl)) {
+        const auto statusToken = pControl->m_statusToken.load();
+        if (pControl->m_triggerMutations.load() != 0 || !isValidJumpCue(pControl)) {
             continue;
         }
         const auto isBackwardJump = pControl->getPosition() > pControl->getEndPosition();
         if (!isBackwardJump && position < pControl->getPosition() &&
                 position >= pControl->getEndPosition()) {
             // is in the range of a forward jump
-            pControl->setStatus(HotcueControl::Status::Set);
+            pControl->tryDisarm(statusToken);
         } else if (isBackwardJump && position >= pControl->getPosition() &&
                 position < pControl->getEndPosition()) {
             // is in the range of a backward jump
-            pControl->setStatus(HotcueControl::Status::Set);
+            pControl->tryDisarm(statusToken);
         }
     }
 }
@@ -343,6 +368,7 @@ void CueControl::createControls() {
     // Create hotcue controls
     for (int i = 0; i < kMaxNumberOfHotcues; ++i) {
         HotcueControl* pControl = new HotcueControl(m_group, i);
+        pControl->m_pTriggerRevision = &m_triggerRevision;
         connect(
                 pControl,
                 &HotcueControl::triggerStateChanged,
@@ -2733,13 +2759,31 @@ ConfigKey HotcueControl::keyForControl(const QString& name) {
     return key;
 }
 
+class HotcueControl::TriggerMutation final {
+  public:
+    explicit TriggerMutation(HotcueControl& control) : m_control(control) {
+        m_control.m_triggerMutations.fetch_add(1);
+        m_control.invalidateStatusToken();
+        if (m_control.m_pTriggerRevision) {
+            m_control.m_pTriggerRevision->fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    ~TriggerMutation() {
+        m_control.invalidateStatusToken();
+        m_control.m_triggerMutations.fetch_sub(1);
+        m_control.notifyTriggerStateChanged();
+    }
+
+  private:
+    HotcueControl& m_control;
+};
+
 HotcueControl::HotcueControl(const QString& group, int hotcueIndex)
         : m_group(group),
           m_hotcueIndex(hotcueIndex),
           m_pCue(nullptr) {
     m_hotcuePosition = std::make_unique<ControlObject>(keyForControl(QStringLiteral("position")));
-    connect(m_hotcuePosition.get(),
-            &ControlObject::valueChanged,
+    m_hotcuePosition->connectValueChangeRequest(
             this,
             &HotcueControl::slotHotcuePositionChanged,
             Qt::DirectConnection);
@@ -2747,8 +2791,7 @@ HotcueControl::HotcueControl(const QString& group, int hotcueIndex)
 
     m_hotcueEndPosition = std::make_unique<ControlObject>(
             keyForControl(QStringLiteral("endposition")));
-    connect(m_hotcueEndPosition.get(),
-            &ControlObject::valueChanged,
+    m_hotcueEndPosition->connectValueChangeRequest(
             this,
             &HotcueControl::slotHotcueEndPositionChanged,
             Qt::DirectConnection);
@@ -2940,12 +2983,14 @@ void HotcueControl::slotHotcueSwap(double v) {
 }
 
 void HotcueControl::slotHotcuePositionChanged(double newPosition) {
-    emit triggerStateChanged();
+    TriggerMutation mutation(*this);
+    m_hotcuePosition->setAndConfirm(newPosition);
     emit hotcuePositionChanged(this, newPosition);
 }
 
 void HotcueControl::slotHotcueEndPositionChanged(double newEndPosition) {
-    emit triggerStateChanged();
+    TriggerMutation mutation(*this);
+    m_hotcueEndPosition->setAndConfirm(newEndPosition);
     emit hotcueEndPositionChanged(this, newEndPosition);
 }
 
@@ -2977,6 +3022,7 @@ mixxx::audio::FramePos HotcueControl::getEndPosition() const {
 }
 
 void HotcueControl::setCue(const CuePointer& pCue) {
+    TriggerMutation mutation(*this);
     DEBUG_ASSERT(!m_pCue);
     Cue::StartAndEndPositions pos = pCue->getStartAndEndPosition();
     setPosition(pos.startPosition);
@@ -2990,7 +3036,7 @@ void HotcueControl::setCue(const CuePointer& pCue) {
     // set pCue only if all other data is in place
     // because we have a null check for valid data else where in the code
     m_pCue = pCue;
-    emit triggerStateChanged();
+    notifyTriggerStateChanged();
 }
 mixxx::RgbColor::optional_t HotcueControl::getColor() const {
     return doubleToRgbColor(m_hotcueColor->get());
@@ -3004,6 +3050,7 @@ void HotcueControl::setColor(mixxx::RgbColor::optional_t newColor) {
 }
 
 void HotcueControl::resetCue() {
+    TriggerMutation mutation(*this);
     // clear pCue first because we have a null check for valid data else where
     // in the code
     m_pCue.reset();
@@ -3011,17 +3058,17 @@ void HotcueControl::resetCue() {
     setEndPosition(mixxx::audio::kInvalidFramePos);
     setType(mixxx::CueType::Invalid);
     setStatus(Status::Empty);
-    emit triggerStateChanged();
+    notifyTriggerStateChanged();
 }
 
 void HotcueControl::setPosition(mixxx::audio::FramePos position) {
-    m_hotcuePosition->set(position.toEngineSamplePosMaybeInvalid());
-    emit triggerStateChanged();
+    TriggerMutation mutation(*this);
+    m_hotcuePosition->setAndConfirm(position.toEngineSamplePosMaybeInvalid());
 }
 
 void HotcueControl::setEndPosition(mixxx::audio::FramePos endPosition) {
-    m_hotcueEndPosition->set(endPosition.toEngineSamplePosMaybeInvalid());
-    emit triggerStateChanged();
+    TriggerMutation mutation(*this);
+    m_hotcueEndPosition->setAndConfirm(endPosition.toEngineSamplePosMaybeInvalid());
 }
 
 mixxx::CueType HotcueControl::getType() const {
@@ -3031,17 +3078,62 @@ mixxx::CueType HotcueControl::getType() const {
 }
 
 void HotcueControl::setType(mixxx::CueType type) {
+    TriggerMutation mutation(*this);
     m_hotcueType->forceSet(static_cast<double>(type));
-    emit triggerStateChanged();
 }
 
 void HotcueControl::setStatus(HotcueControl::Status status) {
-    m_pHotcueStatus->forceSet(static_cast<double>(status));
-    emit triggerStateChanged();
+    m_statusToken.store(nextStatusToken(status));
+    notifyTriggerStateChanged();
+    projectStatus();
 }
 
 HotcueControl::Status HotcueControl::getStatus() const {
-    // Cast to int before casting to the int-based enum class because MSVC will
-    // throw a hissy fit otherwise.
-    return static_cast<Status>(static_cast<int>(m_pHotcueStatus->get()));
+    return static_cast<Status>(m_statusToken.load() & 3);
+}
+
+std::uint64_t HotcueControl::nextStatusToken(Status status) {
+    return (m_nextStatusToken.fetch_add(4) + 4) | static_cast<std::uint64_t>(status);
+}
+
+void HotcueControl::invalidateStatusToken() {
+    auto expectedToken = m_statusToken.load();
+    const auto replacementToken = nextStatusToken(static_cast<Status>(expectedToken & 3));
+    m_statusToken.compare_exchange_strong(expectedToken, replacementToken);
+}
+
+bool HotcueControl::tryDisarm(std::uint64_t expectedToken) {
+    if (m_triggerMutations.load() != 0 ||
+            static_cast<Status>(expectedToken & 3) != Status::Active) {
+        return false;
+    }
+    const auto replacementToken = nextStatusToken(Status::Set);
+    if (!m_statusToken.compare_exchange_strong(expectedToken, replacementToken)) {
+        return false;
+    }
+    if (m_pTriggerRevision) {
+        m_pTriggerRevision->fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
+}
+
+void HotcueControl::notifyTriggerStateChanged() {
+    if (mixxx::AudioCallbackScope::isActive()) {
+        if (m_pTriggerRevision) {
+            m_pTriggerRevision->fetch_add(1, std::memory_order_relaxed);
+        }
+    } else {
+        emit triggerStateChanged();
+    }
+}
+
+void HotcueControl::projectStatus() {
+    if (mixxx::AudioCallbackScope::isActive() || QThread::currentThread() != thread()) {
+        return;
+    }
+    const auto statusToken = m_statusToken.load();
+    if (statusToken != m_projectedStatusToken) {
+        m_pHotcueStatus->forceSet(static_cast<double>(statusToken & 3));
+        m_projectedStatusToken = statusToken;
+    }
 }

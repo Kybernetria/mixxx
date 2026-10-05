@@ -4,6 +4,7 @@
 
 #include "test/callbackallocationcheck.h"
 #include "test/signalpathtest.h"
+#include "util/audiocallbackscope.h"
 
 class CueControlTest : public BaseSignalPathTest {
   protected:
@@ -90,6 +91,18 @@ class CueControlTest : public BaseSignalPathTest {
         cueControl()->m_pTriggerBeatsHazard.store(nullptr);
     }
 
+    std::uint64_t statusToken(int index) const {
+        return hotcue(index)->m_statusToken.load();
+    }
+
+    bool disarm(int index, std::uint64_t token) {
+        return hotcue(index)->tryDisarm(token);
+    }
+
+    void projectStatuses() {
+        cueControl()->projectHotcueStatuses();
+    }
+
     std::unique_ptr<ControlProxy> m_pQuantizeEnabled;
     std::unique_ptr<ControlProxy> m_pCuePoint;
     std::unique_ptr<ControlProxy> m_pIntroStartPosition;
@@ -149,6 +162,155 @@ TEST_F(CueControlTest, SavedJumpUsesPublishedBeatGridWithoutCallbackAllocation) 
             true, FramePos(4.0 * beatLengthFrames), &target, 0, false);
     EXPECT_FRAMEPOS_EQ(FramePos(1000 + beatLengthFrames), reverseTrigger);
     EXPECT_FRAMEPOS_EQ(FramePos(1000 + 3.0 * beatLengthFrames), target);
+}
+
+TEST_F(CueControlTest, SavedJumpCommitPreservesRearmedCue) {
+    using mixxx::audio::FramePos;
+    const auto pTrack = createTestTrack();
+    pTrack->createAndAddCue(mixxx::CueType::Jump, 0, FramePos(10000), FramePos(30000));
+    loadTrack(pTrack);
+    m_pQuantizeEnabled->set(0);
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+
+    FramePos target;
+    const auto trigger = cueControl()->nextTrigger(false, FramePos(0), &target, 0, false);
+    EXPECT_FRAMEPOS_EQ(FramePos(30000), trigger);
+    EXPECT_FRAMEPOS_EQ(FramePos(10000), target);
+    hotcue(0)->setStatus(HotcueControl::Status::Set);
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+    cueControl()->commitTrigger(trigger, target, false);
+    EXPECT_EQ(HotcueControl::Status::Active, hotcue(0)->getStatus());
+
+    const auto currentTrigger =
+            cueControl()->nextTrigger(false, FramePos(0), &target, 0, false);
+    cueControl()->commitTrigger(currentTrigger, target, false);
+    EXPECT_EQ(HotcueControl::Status::Set, hotcue(0)->getStatus());
+}
+
+TEST_F(CueControlTest, SavedJumpConsumptionRejectsStatusAndGeometryABA) {
+    using mixxx::audio::FramePos;
+    const auto pTrack = createTestTrack();
+    pTrack->createAndAddCue(mixxx::CueType::Jump, 0, FramePos(10000), FramePos(30000));
+    loadTrack(pTrack);
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+
+    const auto previousArm = statusToken(0);
+    hotcue(0)->setStatus(HotcueControl::Status::Set);
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+    EXPECT_FALSE(disarm(0, previousArm));
+    EXPECT_EQ(HotcueControl::Status::Active, hotcue(0)->getStatus());
+
+    const auto previousGeometry = statusToken(0);
+    hotcue(0)->setPosition(FramePos(11000));
+    hotcue(0)->setPosition(FramePos(10000));
+    EXPECT_FALSE(disarm(0, previousGeometry));
+    EXPECT_EQ(HotcueControl::Status::Active, hotcue(0)->getStatus());
+    EXPECT_TRUE(disarm(0, statusToken(0)));
+    EXPECT_EQ(HotcueControl::Status::Set, hotcue(0)->getStatus());
+}
+
+TEST_F(CueControlTest, RequestedHotcuePositionIsNotVisibleToTriggerDuringPublication) {
+    using mixxx::audio::FramePos;
+    const auto pTrack = createTestTrack();
+    pTrack->createAndAddCue(mixxx::CueType::Jump, 0, FramePos(10000), FramePos(30000));
+    loadTrack(pTrack);
+    m_pQuantizeEnabled->set(0);
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+
+    ControlProxy position(m_sGroup1, "hotcue_1_position");
+    bool observedPublication = false;
+    ASSERT_TRUE(position.connectValueChanged(cueControl(),
+            [&](double) {
+                FramePos target;
+                observedPublication = true;
+                const auto trigger = cueControl()->nextTrigger(
+                        false, FramePos(0), &target, 0, false);
+                EXPECT_FALSE(trigger.isValid());
+            },
+            Qt::DirectConnection));
+    position.set(FramePos(11000).toEngineSamplePos());
+    QObject::disconnect(&position, nullptr, cueControl(), nullptr);
+    ASSERT_TRUE(observedPublication);
+    FramePos target;
+    EXPECT_FRAMEPOS_EQ(FramePos(30000),
+            cueControl()->nextTrigger(false, FramePos(0), &target, 0, false));
+    EXPECT_FRAMEPOS_EQ(FramePos(11000), target);
+}
+
+TEST_F(CueControlTest, CallbackHotcueStatusChangesDeferPublicControlPublication) {
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+    ControlProxy status(m_sGroup1, "hotcue_1_status");
+    const auto token = statusToken(0);
+    const auto previousRevision = cueControl()->triggerRevision();
+    mixxxtest::callbackAllocations = 0;
+    mixxxtest::callbackDeallocations = 0;
+    const bool previousCounting = mixxxtest::countCallbackAllocations;
+    bool consumed;
+    {
+        mixxx::AudioCallbackScope callbackScope;
+        mixxxtest::countCallbackAllocations = true;
+        consumed = disarm(0, token);
+        hotcue(0)->setStatus(HotcueControl::Status::Active);
+        hotcue(0)->setStatus(HotcueControl::Status::Set);
+        mixxxtest::countCallbackAllocations = previousCounting;
+    }
+    EXPECT_TRUE(consumed);
+    EXPECT_EQ(HotcueControl::Status::Set, hotcue(0)->getStatus());
+    EXPECT_GT(cueControl()->triggerRevision(), previousRevision);
+    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Active), status.get());
+    EXPECT_EQ(0u, mixxxtest::callbackAllocations);
+    EXPECT_EQ(0u, mixxxtest::callbackDeallocations);
+
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+    projectStatuses();
+    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Active), status.get());
+    {
+        mixxx::AudioCallbackScope callbackScope;
+        hotcue(0)->setStatus(HotcueControl::Status::Set);
+    }
+    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Active), status.get());
+    projectStatuses();
+    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Set), status.get());
+}
+
+TEST_F(CueControlTest, OwnerTimerPublishesCallbackHotcueConsumption) {
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+    ControlProxy status(m_sGroup1, "hotcue_1_status");
+    {
+        mixxx::AudioCallbackScope callbackScope;
+        ASSERT_TRUE(disarm(0, statusToken(0)));
+    }
+    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Active), status.get());
+    for (int i = 0; i < 200 &&
+            status.get() != static_cast<double>(HotcueControl::Status::Set);
+            ++i) {
+        QTest::qWait(5);
+    }
+    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Set), status.get());
+}
+
+TEST_F(CueControlTest, ReentrantStatusProjectionPreservesNewestArm) {
+    hotcue(0)->setStatus(HotcueControl::Status::Active);
+    ControlProxy status(m_sGroup1, "hotcue_1_status");
+    bool rearmed = false;
+    ASSERT_TRUE(status.connectValueChanged(cueControl(),
+            [&](double value) {
+                if (!rearmed && value == static_cast<double>(HotcueControl::Status::Set)) {
+                    rearmed = true;
+                    hotcue(0)->setStatus(HotcueControl::Status::Active);
+                }
+            },
+            Qt::DirectConnection));
+    {
+        mixxx::AudioCallbackScope callbackScope;
+        ASSERT_TRUE(disarm(0, statusToken(0)));
+    }
+    projectStatuses();
+    ASSERT_TRUE(rearmed);
+    EXPECT_EQ(HotcueControl::Status::Active, hotcue(0)->getStatus());
+    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Active), status.get());
+    projectStatuses();
+    EXPECT_DOUBLE_EQ(static_cast<double>(HotcueControl::Status::Active), status.get());
 }
 
 TEST_F(CueControlTest, PublishedBeatGridLivesUntilCallbackReleasesIt) {

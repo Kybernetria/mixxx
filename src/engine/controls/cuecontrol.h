@@ -20,6 +20,7 @@ class ControlObject;
 class ControlPushButton;
 class ControlIndicator;
 class ControlProxy;
+QT_FORWARD_DECLARE_CLASS(QTimer);
 
 enum class CueMode {
     Mixxx,
@@ -159,6 +160,29 @@ class HotcueControl : public QObject {
     void hotcuePlay(double v);
 
   private:
+    friend class CueControl;
+    friend class CueControlTest;
+    class TriggerMutation;
+
+    std::uint64_t nextStatusToken(Status status);
+    void invalidateStatusToken();
+    bool tryDisarm(std::uint64_t expectedToken);
+    void projectStatus();
+    void notifyTriggerStateChanged();
+
+    // AI-generated explanation.
+    // Internal status and its unique generation share one lock-free value. Audio
+    // consumes only the selected generation; public status is owner-thread output.
+    // Metadata edits invalidate tokens and temporarily suppress trigger queries.
+    // End of AI-generated explanation.
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+    static_assert(std::atomic<unsigned int>::is_always_lock_free);
+    std::atomic<std::uint64_t> m_nextStatusToken{0};
+    std::atomic<std::uint64_t> m_statusToken{0};
+    std::atomic<unsigned int> m_triggerMutations{0};
+    std::uint64_t m_projectedStatusToken{0};
+    std::atomic<std::uint64_t>* m_pTriggerRevision{nullptr};
+
     ConfigKey keyForControl(const QString& name);
 
     const QString m_group;
@@ -317,6 +341,7 @@ class CueControl : public EngineControl {
             mixxx::audio::FramePos position, const mixxx::Beats* pBeats);
     void publishTriggerBeats(mixxx::BeatsPointer pBeats);
     bool acquireTriggerBeats(const mixxx::Beats** ppBeats);
+    void projectHotcueStatuses();
     mixxx::audio::FramePos getQuantizedCurrentPosition();
     TrackAt getTrackAt() const;
     void seekOnLoad(mixxx::audio::FramePos seekOnLoadPosition);
@@ -346,6 +371,7 @@ class CueControl : public EngineControl {
     friend class ReadAheadManagerTest;
     friend class CueControlTest;
     QList<HotcueControl*> m_hotcueControls;
+    parented_ptr<QTimer> m_pHotcueStatusTimer;
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
     std::atomic<std::uint64_t> m_triggerRevision{0};
     struct ReadTriggerDecision {
@@ -355,6 +381,7 @@ class CueControl : public EngineControl {
         mixxx::audio::FramePos trigger;
         mixxx::audio::FramePos target;
         std::uint64_t revision = 0;
+        std::uint64_t statusToken = 0;
         bool reverse = false;
     };
     // Only nextTrigger/commitTrigger on the callback access this decision.
