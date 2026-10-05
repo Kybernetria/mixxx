@@ -34,16 +34,17 @@ class ControlRingValue {
     // This operation can be repeated multiple times for the same
     // slot, because the stored value is preserved.
     bool tryGet(T* value) const {
-        // Read while consuming one readerSlot
-        if (m_readerSlots.fetch_sub(1, std::memory_order_acquire) > 0) {
-            // Reader slot has been acquired, no writer is active
-            *value = m_value;
-            m_readerSlots.fetch_add(1, std::memory_order_release);
-            // We need the early return here to make the compiler
-            // aware that *value is initialised in the true case.
-            return true;
+        auto slots = m_readerSlots.load(std::memory_order_relaxed);
+        for (int attempt = 0; attempt < 8 && slots != 0; ++attempt) {
+            if (m_readerSlots.compare_exchange_weak(slots,
+                        slots - 1,
+                        std::memory_order_acquire,
+                        std::memory_order_relaxed)) {
+                *value = m_value;
+                m_readerSlots.fetch_add(1, std::memory_order_release);
+                return true;
+            }
         }
-        m_readerSlots.fetch_add(1, std::memory_order_release);
         return false;
     }
 
@@ -52,10 +53,7 @@ class ControlRingValue {
         std::size_t expected = kMaxReaderSlots;
         if (m_readerSlots.compare_exchange_strong(expected, 0, std::memory_order_acquire)) {
             m_value = value;
-            // We need to re-add kMaxReaderSlots instead of storing it
-            // to keep the balance if readers have decreased the number
-            // of slots in the meantime!
-            m_readerSlots.fetch_add(kMaxReaderSlots, std::memory_order_release);
+            m_readerSlots.store(kMaxReaderSlots, std::memory_order_release);
             return true;
         }
         return false;
