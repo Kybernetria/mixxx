@@ -514,6 +514,7 @@ double BpmControl::shortestPercentageChange(const double& current_percentage,
 }
 
 double BpmControl::calcSyncedRate(double userTweak) {
+    const auto beats = acquireBeats();
     if (kLogger.traceEnabled()) {
         kLogger.trace() << "calcSyncedRate" << getGroup() << "tweak:" << userTweak;
     }
@@ -525,7 +526,7 @@ double BpmControl::calcSyncedRate(double userTweak) {
 
     // If we are not quantized, or there are no beats, or we're leader,
     // or we're in reverse, just return the rate as-is.
-    if (!m_quantize.toBool() || !m_pBeats || m_reverseButton.toBool() ||
+    if (!m_quantize.toBool() || !beats || m_reverseButton.toBool() ||
             (getEngineBuffer() && getEngineBuffer()->isRecoveringLiveTimeline())) {
         m_resetSyncAdjustment = true;
         return rate + userTweak;
@@ -706,6 +707,21 @@ bool BpmControl::getBeatContext(
         mixxx::audio::FramePos* pNextBeatPosition,
         mixxx::audio::FrameDiff_t* pBeatLengthFrames,
         double* pBeatPercentage) {
+    return getBeatContext(pBeats.get(),
+            position,
+            pPrevBeatPosition,
+            pNextBeatPosition,
+            pBeatLengthFrames,
+            pBeatPercentage);
+}
+
+bool BpmControl::getBeatContext(
+        const mixxx::Beats* pBeats,
+        mixxx::audio::FramePos position,
+        mixxx::audio::FramePos* pPrevBeatPosition,
+        mixxx::audio::FramePos* pNextBeatPosition,
+        mixxx::audio::FrameDiff_t* pBeatLengthFrames,
+        double* pBeatPercentage) {
     if (!pBeats) {
         return false;
     }
@@ -759,7 +775,8 @@ bool BpmControl::getBeatContextNoLookup(
 mixxx::audio::FramePos BpmControl::getNearestPositionInPhase(
         mixxx::audio::FramePos thisPosition, bool respectLoops, bool playing) {
     // Without a beatgrid, we don't know the phase offset.
-    const mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beats = acquireBeats();
+    const auto* pBeats = beats.get();
     if (!pBeats) {
         return thisPosition;
     }
@@ -822,9 +839,11 @@ mixxx::audio::FramePos BpmControl::getNearestPositionInPhase(
             return thisPosition;
         }
 
-        TrackPointer otherTrack = pOtherEngineBuffer->getLoadedTrack();
-        mixxx::BeatsPointer otherBeats =
-                otherTrack ? otherTrack->getBeats() : mixxx::BeatsPointer();
+        const auto* pOtherBpmControl = pOtherEngineBuffer->getBpmControl();
+        if (!pOtherBpmControl) {
+            return thisPosition;
+        }
+        const auto otherBeats = pOtherBpmControl->acquireBeats();
 
         // If either track does not have beats, then we can't adjust the phase.
         if (!otherBeats) {
@@ -832,7 +851,7 @@ mixxx::audio::FramePos BpmControl::getNearestPositionInPhase(
         }
 
         const auto otherPosition = pOtherEngineBuffer->getExactPlayPos();
-        if (!BpmControl::getBeatContext(otherBeats,
+        if (!BpmControl::getBeatContext(otherBeats.get(),
                     otherPosition,
                     nullptr,
                     nullptr,
@@ -929,7 +948,9 @@ mixxx::audio::FramePos BpmControl::getNearestPositionInPhase(
 mixxx::audio::FramePos BpmControl::getBeatMatchPosition(
         mixxx::audio::FramePos thisPosition, bool respectLoops, bool playing) {
     // Without a beatgrid, we don't know the phase offset.
-    if (!m_pBeats) {
+    const auto beats = acquireBeats();
+    const auto* pBeats = beats.get();
+    if (!pBeats) {
         return thisPosition;
     }
     const double thisRateRatio = m_pRateRatio->get();
@@ -980,13 +1001,15 @@ mixxx::audio::FramePos BpmControl::getBeatMatchPosition(
         }
         // This happens if thisPosition is the target position of a requested
         // seek command.  Get new prev and next beats for the calculation.
-        getBeatContext(
-                m_pBeats,
-                thisPosition,
-                &thisPrevBeatPosition,
-                &thisNextBeatPosition,
-                &thisBeatLengthFrames,
-                nullptr);
+        if (!getBeatContext(
+                    pBeats,
+                    thisPosition,
+                    &thisPrevBeatPosition,
+                    &thisNextBeatPosition,
+                    &thisBeatLengthFrames,
+                    nullptr)) {
+            return thisPosition;
+        }
         // now we either have a useful next beat or there is none
         if (!thisNextBeatPosition.isValid()) {
             // We can't match the next beat, give up.
@@ -999,16 +1022,21 @@ mixxx::audio::FramePos BpmControl::getBeatMatchPosition(
         }
         // We are between the previous and next beats so we can try a standard
         // lookup of the beat length.
-        getBeatContextNoLookup(
-                thisPosition,
-                thisPrevBeatPosition,
-                thisNextBeatPosition,
-                &thisBeatLengthFrames,
-                nullptr);
+        if (!getBeatContextNoLookup(
+                    thisPosition,
+                    thisPrevBeatPosition,
+                    thisNextBeatPosition,
+                    &thisBeatLengthFrames,
+                    nullptr)) {
+            return thisPosition;
+        }
     }
 
-    TrackPointer otherTrack = pOtherEngineBuffer->getLoadedTrack();
-    mixxx::BeatsPointer otherBeats = otherTrack ? otherTrack->getBeats() : mixxx::BeatsPointer();
+    const auto* pOtherBpmControl = pOtherEngineBuffer->getBpmControl();
+    if (!pOtherBpmControl) {
+        return thisPosition;
+    }
+    const auto otherBeats = pOtherBpmControl->acquireBeats();
 
     // If either track does not have beats, then we can't adjust the phase.
     if (!otherBeats) {
@@ -1016,7 +1044,7 @@ mixxx::audio::FramePos BpmControl::getBeatMatchPosition(
     }
 
     const mixxx::audio::FramePos otherPosition = pOtherEngineBuffer->getExactPlayPos();
-    const mixxx::audio::SampleRate thisSampleRate = m_pBeats->getSampleRate();
+    const mixxx::audio::SampleRate thisSampleRate = pBeats->getSampleRate();
 
     // Seek our next beat to the other next beat near our beat.
     // This is the only thing we can do if the track has different BPM,
@@ -1037,7 +1065,7 @@ mixxx::audio::FramePos BpmControl::getBeatMatchPosition(
     mixxx::audio::FrameDiff_t otherBeatLengthFrames = -1;
     double otherBeatFraction = -1;
     if (!BpmControl::getBeatContext(
-                otherBeats,
+                otherBeats.get(),
                 otherPositionOfThisNextBeat,
                 &otherPrevBeatPosition,
                 &otherNextBeatPosition,
@@ -1187,7 +1215,7 @@ void BpmControl::trackBeatsUpdated(mixxx::BeatsPointer pBeats) {
                                              frameInfo().trackEndPosition)
                                    : mixxx::Bpm());
     }
-    m_pBeats = pBeats;
+    m_beatsSnapshot.publish(std::move(pBeats));
     updateLocalBpm();
     resetSyncAdjustment();
     TrackPointer pTrack = getEngineBuffer()->getLoadedTrack();
@@ -1266,7 +1294,11 @@ void BpmControl::slotToggleBpmLock(double v) {
 mixxx::Bpm BpmControl::updateLocalBpm() {
     mixxx::Bpm prevLocalBpm = mixxx::Bpm(m_pLocalBpm->get());
     mixxx::Bpm localBpm;
-    const mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beats = acquireBeats();
+    if (!beats.acquired()) {
+        return prevLocalBpm;
+    }
+    const auto* pBeats = beats.get();
     const FrameInfo info = frameInfo();
     if (pBeats) {
         if (info.currentPosition.isValid() && info.currentPosition != kInitialPlayPosition) {
@@ -1332,7 +1364,8 @@ void BpmControl::resetSyncAdjustment() {
 void BpmControl::collectFeatures(GroupFeatureState* pGroupFeatures, double speed) const {
     // Without a beatgrid we don't know any beat details.
     FrameInfo info = frameInfo();
-    if (!info.sampleRate.isValid() || !m_pBeats) {
+    const auto beats = acquireBeats();
+    if (!info.sampleRate.isValid() || !beats) {
         return;
     }
 

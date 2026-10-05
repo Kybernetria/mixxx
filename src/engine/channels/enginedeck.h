@@ -87,7 +87,9 @@ class EngineDeck : public EngineChannel, public AudioDestination {
   private:
 #ifdef __STEM__
     // Process multiple channels and mix them together into the passed buffer
-    void processStem(CSAMPLE* pOutput, const std::size_t bufferSize);
+    void processStem(CSAMPLE* pOutput,
+            const std::size_t bufferSize,
+            mixxx::audio::ChannelCount channelCount);
 #endif
 
     std::vector<ChannelHandleAndGroup> m_stems;

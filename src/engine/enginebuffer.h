@@ -4,6 +4,7 @@
 
 #include <QAtomicInt>
 #include <QMutex>
+#include <atomic>
 #include <initializer_list>
 
 #include "audio/frame.h"
@@ -17,6 +18,7 @@
 #include "preferences/usersettings.h"
 #include "track/bpm.h"
 #include "track/track_decl.h"
+#include "util/compatibility/qmutex.h"
 #include "util/types.h"
 
 //for the writer
@@ -117,7 +119,7 @@ class EngineBuffer : public EngineObject {
     // Return the current rate (not thread-safe)
     double getSpeed() const;
     mixxx::audio::ChannelCount getChannelCount() const {
-        return m_channelCount;
+        return mixxx::audio::ChannelCount(m_publishedChannelCount.load(std::memory_order_acquire));
     }
     mixxx::audio::FramePos getPlayPos() const {
         return m_playPos;
@@ -126,6 +128,9 @@ class EngineBuffer : public EngineObject {
     bool isReverse() const;
     /// Returns current bpm value (not thread-safe)
     mixxx::Bpm getBpm() const;
+    BpmControl* getBpmControl() const {
+        return m_pBpmControl;
+    }
     /// Returns the BPM of the loaded track around the current position (not thread-safe)
     mixxx::Bpm getLocalBpm() const;
     /// Sets a beatloop for the loaded track (not thread safe)
@@ -148,6 +153,9 @@ class EngineBuffer : public EngineObject {
 
     // The process methods all run in the audio callback.
     void process(CSAMPLE* pOut, const std::size_t bufferSize) override;
+    void process(CSAMPLE* pOut,
+            const std::size_t bufferSize,
+            mixxx::audio::ChannelCount expectedChannelCount);
     void processSlip(std::size_t bufferSize);
     void postProcessLocalBpm();
     void postProcess(const std::size_t bufferSize);
@@ -259,6 +267,7 @@ class EngineBuffer : public EngineObject {
     // Fired when passthrough mode is enabled or disabled.
     void slotPassthroughChanged(double v);
     void slotUpdatedTrackBeats();
+    void slotUpdatedTrackBpmLock();
 
   private:
     struct QueuedSeek {
@@ -469,6 +478,7 @@ class EngineBuffer : public EngineObject {
     bool m_previousBufferSeek = false;
     bool m_liveTimeline = false;
     bool m_slipTimeline = false;
+    mixxx::audio::FramePos m_pendingSlipRestorePosition = mixxx::audio::kInvalidFramePos;
 
     QAtomicInt m_slipQuitAndAdopt;
     /// Indicates that no seek is queued
@@ -486,8 +496,11 @@ class EngineBuffer : public EngineObject {
 
     // The current channel count of the loaded track
     mixxx::audio::ChannelCount m_channelCount;
+    std::atomic<mixxx::audio::ChannelCount::value_t> m_publishedChannelCount{
+            mixxx::audio::ChannelCount::stereo().value()};
 
     TrackPointer m_pCurrentTrack;
+    mutable QT_RECURSIVE_MUTEX m_trackNotificationMutex{QT_RECURSIVE_MUTEX_INIT};
 #ifdef __SCALER_DEBUG__
     QFile df;
     QTextStream writer;

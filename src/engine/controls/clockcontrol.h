@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 
 #include "audio/frame.h"
@@ -7,6 +8,7 @@
 #include "preferences/usersettings.h"
 #include "track/beats.h"
 #include "track/track_decl.h"
+#include "util/immutableaudiosnapshot.h"
 
 class ControlProxy;
 class ControlObject;
@@ -57,6 +59,6 @@ class ClockControl: public EngineControl {
 
     StateMachine m_internalState;
 
-    // m_pBeats is written from an engine worker thread
-    mixxx::BeatsPointer m_pBeats;
+    mixxx::ImmutableAudioSnapshot<mixxx::Beats> m_beatsSnapshot;
+    std::atomic<bool> m_beatsChanged{true};
 };

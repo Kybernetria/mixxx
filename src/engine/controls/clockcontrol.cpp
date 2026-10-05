@@ -45,12 +45,31 @@ void ClockControl::trackLoaded(TrackPointer pNewTrack) {
 void ClockControl::trackBeatsUpdated(mixxx::BeatsPointer pBeats) {
     // Clear on-beat control
     m_pCOBeatActive->forceSet(0.0);
-    m_pBeats = pBeats;
+    m_beatsSnapshot.publish(std::move(pBeats));
+    m_beatsChanged.store(true);
 }
 
 void ClockControl::updateIndicators(const double dRate,
         mixxx::audio::FramePos currentPosition,
         mixxx::audio::SampleRate sampleRate) {
+    const bool beatsChanged = m_beatsChanged.exchange(false);
+    const auto beats = m_beatsSnapshot.acquire();
+    if (!beats.acquired()) {
+        if (beatsChanged) {
+            m_beatsChanged.store(true);
+        }
+        return;
+    }
+    if (beatsChanged || !beats) {
+        m_prevBeatPosition = mixxx::audio::kInvalidFramePos;
+        m_nextBeatPosition = mixxx::audio::kInvalidFramePos;
+        m_internalState = StateMachine::outsideIndicationArea;
+        m_pCOBeatActive->forceSet(0.0);
+    }
+    if (!beats) {
+        m_lastEvaluatedPosition = currentPosition;
+        return;
+    }
     /* This method sets the control beat_active is set to the following values:
     *  0.0 --> No beat indication (outside 20% area or play direction changed while indication was on)
     *  1.0 --> Forward playing, set at the beat and set back to 0.0 at 20% of beat distance
@@ -59,7 +78,8 @@ void ClockControl::updateIndicators(const double dRate,
 
     // No position change since last indicator update (e.g. deck stopped) -> No indicator update needed
     // The kSignificiantRateThreshold condition ensures an immediate indicator update, when the play/cue button is pressed
-    if ((currentPosition <= (m_lastEvaluatedPosition + kStandStillTolerance * sampleRate)) &&
+    if (!beatsChanged &&
+            (currentPosition <= (m_lastEvaluatedPosition + kStandStillTolerance * sampleRate)) &&
             (currentPosition >= (m_lastEvaluatedPosition - kStandStillTolerance * sampleRate)) &&
             (fabs(dRate) <= kSignificiantRateThreshold)) {
         return;
@@ -75,7 +95,7 @@ void ClockControl::updateIndicators(const double dRate,
     mixxx::audio::FramePos prevIndicatorPosition;
     mixxx::audio::FramePos nextIndicatorPosition;
 
-    const mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto* pBeats = beats.get();
     if (pBeats) {
         if (!m_prevBeatPosition.isValid() || !m_nextBeatPosition.isValid() ||
                 currentPosition >= m_nextBeatPosition ||

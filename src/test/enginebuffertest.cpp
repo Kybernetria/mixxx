@@ -3,6 +3,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <array>
+
 #include <QString>
 #include <QTest>
 #include <QtDebug>
@@ -15,6 +17,7 @@
 #include "test/mixxxtest.h"
 #include "test/mockedenginebackendtest.h"
 #include "test/signalpathtest.h"
+#include "util/duration.h"
 
 // In case any of the test in this file fail. You can use the audioplot.py tool
 // in the tools folder to visually compare the results of the enginebuffer
@@ -27,6 +30,47 @@ const QString kAppGroup = QStringLiteral("[App]");
 class EngineBufferTest : public MockedEngineBackendTest {};
 
 class EngineBufferE2ETest : public SignalPathTest {};
+
+TEST_F(EngineBufferTest, ChannelFormatMismatchClearsOutputWithoutRendering) {
+    auto* pBuffer = m_pChannel1->getEngineBuffer();
+    for (const auto channelCount : {mixxx::audio::ChannelCount::stereo(),
+                 mixxx::audio::ChannelCount::stem()}) {
+        m_pTrack1->setAudioProperties(channelCount,
+                mixxx::audio::SampleRate(44100),
+                mixxx::audio::Bitrate(),
+                mixxx::Duration::fromSeconds(180));
+        pBuffer->loadFakeTrack(m_pTrack1, true);
+        ASSERT_EQ(pBuffer->getChannelCount(), channelCount);
+        const auto expectedChannelCount = channelCount == mixxx::audio::ChannelCount::stereo()
+                ? mixxx::audio::ChannelCount::stem()
+                : mixxx::audio::ChannelCount::stereo();
+        std::array<CSAMPLE, 258> output;
+        output.fill(0.75f);
+        const auto previousPosition = pBuffer->getPlayPos();
+        const auto previousTempo = m_pMockScaleVinyl1->getProcessedTempo();
+        pBuffer->process(output.data() + 1, 256, expectedChannelCount);
+        EXPECT_EQ(pBuffer->getPlayPos(), previousPosition);
+        EXPECT_EQ(m_pMockScaleVinyl1->getProcessedTempo(), previousTempo);
+        EXPECT_EQ(output.front(), 0.75f);
+        EXPECT_EQ(output.back(), 0.75f);
+        for (std::size_t i = 1; i + 1 < output.size(); ++i) {
+            EXPECT_EQ(output[i], 0.0f);
+        }
+    }
+}
+
+TEST_F(EngineBufferTest, ReplacedTrackBpmLockCannotChangeCurrentDeck) {
+    const auto oldTrack = m_pTrack1;
+    oldTrack->setBpmLocked(false);
+    const auto currentTrack = m_pMixerDeck1->loadFakeTrack(false, 0.0);
+    ASSERT_NE(oldTrack, currentTrack);
+    currentTrack->setBpmLocked(false);
+    EXPECT_EQ(ControlObject::get(ConfigKey(m_sGroup1, "bpmlock")), 0.0);
+    oldTrack->setBpmLocked(true);
+    EXPECT_EQ(ControlObject::get(ConfigKey(m_sGroup1, "bpmlock")), 0.0);
+    currentTrack->setBpmLocked(true);
+    EXPECT_EQ(ControlObject::get(ConfigKey(m_sGroup1, "bpmlock")), 1.0);
+}
 
 TEST_F(EngineBufferTest, DisableKeylockResetsPitch) {
     // To prevent one-slider users from getting stuck on a key,

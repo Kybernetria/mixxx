@@ -2932,6 +2932,7 @@ if(BUILD_TESTING)
     src/test/audiotaperpot_test.cpp
     src/test/autodjprocessor_test.cpp
     src/test/beatgridtest.cpp
+    src/test/beataudiosnapshots_test.cpp
     src/test/beatmaptest.cpp
     src/test/beatstest.cpp
     src/test/beatstranslatetest.cpp
@@ -2988,6 +2989,7 @@ if(BUILD_TESTING)
     src/test/fileinfo_test.cpp
     src/test/frametest.cpp
     src/test/globaltrackcache_test.cpp
+    src/test/immutableaudiosnapshot_test.cpp
     src/test/hotcuecontrol_test.cpp
     src/test/hotcueorderbyposition_test.cpp
     src/test/imageutils_test.cpp

@@ -30,25 +30,28 @@ QuantizeControl::~QuantizeControl() {
 }
 
 void QuantizeControl::trackLoaded(TrackPointer pNewTrack) {
-    if (pNewTrack) {
-        m_pBeats = pNewTrack->getBeats();
+    m_beatsSnapshot.publish(pNewTrack ? pNewTrack->getBeats() : mixxx::BeatsPointer{});
+    const auto beats = m_beatsSnapshot.acquire();
+    if (beats.acquired()) {
         // Initialize prev and next beat as if current position was zero.
         // If there is a cue point, the value will be updated.
-        lookupBeatPositions(mixxx::audio::kStartFramePos);
-        updateClosestBeat(mixxx::audio::kStartFramePos);
-    } else {
-        m_pBeats.reset();
-        m_pCOPrevBeat->set(mixxx::audio::kInvalidFramePos.toEngineSamplePosMaybeInvalid());
-        m_pCONextBeat->set(mixxx::audio::kInvalidFramePos.toEngineSamplePosMaybeInvalid());
-        m_pCOClosestBeat->set(mixxx::audio::kInvalidFramePos.toEngineSamplePosMaybeInvalid());
+        lookupBeatPositions(mixxx::audio::kStartFramePos, beats.get());
+        updateClosestBeat(mixxx::audio::kStartFramePos, beats.get());
     }
+    m_beatsChanged.store(true);
 }
 
 void QuantizeControl::trackBeatsUpdated(mixxx::BeatsPointer pBeats) {
-    m_pBeats = pBeats;
+    m_beatsSnapshot.publish(std::move(pBeats));
+    const auto beats = m_beatsSnapshot.acquire();
+    if (!beats.acquired()) {
+        m_beatsChanged.store(true);
+        return;
+    }
     const mixxx::audio::FramePos currentPosition = frameInfo().currentPosition;
-    lookupBeatPositions(currentPosition);
-    updateClosestBeat(currentPosition);
+    lookupBeatPositions(currentPosition, beats.get());
+    updateClosestBeat(currentPosition, beats.get());
+    m_beatsChanged.store(true);
 }
 
 void QuantizeControl::setFrameInfo(mixxx::audio::FramePos currentPosition,
@@ -75,6 +78,14 @@ void QuantizeControl::playPosChanged(mixxx::audio::FramePos position) {
     if (position == kInitialPlayPosition) {
         return;
     }
+    const bool beatsChanged = m_beatsChanged.exchange(false);
+    const auto beats = m_beatsSnapshot.acquire();
+    if (!beats.acquired()) {
+        if (beatsChanged) {
+            m_beatsChanged.store(true);
+        }
+        return;
+    }
 
     // We only need to update the prev or next if the current sample is
     // out of range of the existing beat positions or if we've been forced to
@@ -85,16 +96,16 @@ void QuantizeControl::playPosChanged(mixxx::audio::FramePos position) {
     const auto nextBeatPosition =
             mixxx::audio::FramePos::fromEngineSamplePosMaybeInvalid(
                     m_pCONextBeat->get());
-    if (!prevBeatPosition.isValid() || position < prevBeatPosition ||
+    if (beatsChanged || !beats || !prevBeatPosition.isValid() || position < prevBeatPosition ||
             !nextBeatPosition.isValid() || position > nextBeatPosition) {
-        lookupBeatPositions(position);
+        lookupBeatPositions(position, beats.get());
     }
-    updateClosestBeat(position);
+    updateClosestBeat(position, beats.get());
 }
 
-void QuantizeControl::lookupBeatPositions(mixxx::audio::FramePos position) {
+void QuantizeControl::lookupBeatPositions(
+        mixxx::audio::FramePos position, const mixxx::Beats* pBeats) {
     DEBUG_ASSERT(position.isValid());
-    mixxx::BeatsPointer pBeats = m_pBeats;
     if (pBeats) {
         mixxx::audio::FramePos prevBeatPosition;
         mixxx::audio::FramePos nextBeatPosition;
@@ -102,12 +113,17 @@ void QuantizeControl::lookupBeatPositions(mixxx::audio::FramePos position) {
         // FIXME: -1.0 is a valid frame position, should we set the COs to NaN?
         m_pCOPrevBeat->set(prevBeatPosition.toEngineSamplePosMaybeInvalid());
         m_pCONextBeat->set(nextBeatPosition.toEngineSamplePosMaybeInvalid());
+    } else {
+        m_pCOPrevBeat->set(mixxx::audio::kInvalidFramePos.toEngineSamplePosMaybeInvalid());
+        m_pCONextBeat->set(mixxx::audio::kInvalidFramePos.toEngineSamplePosMaybeInvalid());
     }
 }
 
-void QuantizeControl::updateClosestBeat(mixxx::audio::FramePos position) {
+void QuantizeControl::updateClosestBeat(
+        mixxx::audio::FramePos position, const mixxx::Beats* pBeats) {
     DEBUG_ASSERT(position.isValid());
-    if (!m_pBeats) {
+    if (!pBeats) {
+        m_pCOClosestBeat->set(mixxx::audio::kInvalidFramePos.toEngineSamplePosMaybeInvalid());
         return;
     }
     const auto prevBeatPosition =

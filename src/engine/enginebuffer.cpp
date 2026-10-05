@@ -29,6 +29,7 @@
 #include "preferences/usersettings.h"
 #include "track/track.h"
 #include "util/assert.h"
+#include "util/audiocallbackscope.h"
 #include "util/compatibility/qatomic.h"
 #include "util/defs.h"
 #include "util/fpclassify.h"
@@ -564,6 +565,7 @@ void EngineBuffer::slotTrackLoaded(TrackPointer pTrack,
         mixxx::audio::SampleRate trackSampleRate,
         mixxx::audio::ChannelCount trackChannelCount,
         mixxx::audio::FramePos trackNumFrame) {
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
     if (kLogger.traceEnabled()) {
         kLogger.trace() << "slotTrackLoaded" << getGroup();
     }
@@ -589,6 +591,7 @@ void EngineBuffer::slotTrackLoaded(TrackPointer pTrack,
         // CachingReaderChunk::bufferSampleFrames
         m_channelCount = mixxx::audio::ChannelCount::stereo();
     }
+    m_publishedChannelCount.store(m_channelCount.value(), std::memory_order_release);
 
     m_pTrackSamples->set(trackNumFrame.toEngineSamplePos());
     m_pTrackSampleRate->set(trackSampleRate.toDouble());
@@ -599,6 +602,7 @@ void EngineBuffer::slotTrackLoaded(TrackPointer pTrack,
     m_bSlipEnabledProcessing = false;
     m_slipPos = mixxx::audio::kStartFramePos;
     m_dSlipRate = 0;
+    m_pendingSlipRestorePosition = mixxx::audio::kInvalidFramePos;
     m_naturalRateOld = 0;
     m_slipModeState = SlipModeState::Disabled;
 
@@ -637,6 +641,7 @@ void EngineBuffer::slotTrackLoadFailed(TrackPointer pTrack,
 }
 
 void EngineBuffer::ejectTrack() {
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
     // clear track values in any case, may fix https://github.com/mixxxdj/mixxx/issues/8000
     if (kLogger.traceEnabled()) {
         kLogger.trace() << "ejectTrack()";
@@ -660,6 +665,7 @@ void EngineBuffer::ejectTrack() {
     doSeekPlayPos(mixxx::audio::kStartFramePos, SEEK_EXACT);
 
     m_pCurrentTrack.reset();
+    m_pendingSlipRestorePosition = mixxx::audio::kInvalidFramePos;
     setTrackEndPosition(mixxx::audio::kInvalidFramePos);
     m_pTrackSampleRate->set(0);
     m_pTrackLoaded->forceSet(0);
@@ -698,6 +704,11 @@ void EngineBuffer::notifyTrackLoaded(
                 &Track::beatsUpdated,
                 this,
                 &EngineBuffer::slotUpdatedTrackBeats);
+        disconnect(
+                pOldTrack.get(),
+                &Track::bpmLockChanged,
+                this,
+                &EngineBuffer::slotUpdatedTrackBpmLock);
     }
 
     // First inform engineControls directly
@@ -717,11 +728,10 @@ void EngineBuffer::notifyTrackLoaded(
                 Qt::DirectConnection);
         connect(pNewTrack.get(),
                 &Track::bpmLockChanged,
-                m_pBpmControl,
-                &BpmControl::trackBpmLockChanged,
+                this,
+                &EngineBuffer::slotUpdatedTrackBpmLock,
                 Qt::DirectConnection);
-        bool bpmLocked = pNewTrack.get()->isBpmLocked();
-        m_pBpmControl->trackBpmLockChanged(bpmLocked);
+        slotUpdatedTrackBpmLock();
     }
 
     // Inform BaseTrackPlayer via a queued connection
@@ -804,8 +814,9 @@ bool EngineBuffer::updateIndicatorsAndModifyPlay(bool newPlay, bool oldPlay) {
     // asynchrony.
     bool playPossible = true;
     const QueuedSeek queuedSeek = m_queuedSeek.getValue();
-    if ((!m_pCurrentTrack && atomicLoadRelaxed(m_iTrackLoading) == 0) ||
-            (m_pCurrentTrack && atomicLoadRelaxed(m_iTrackLoading) == 0 &&
+    const bool trackLoaded = m_pTrackLoaded->toBool();
+    if ((!trackLoaded && atomicLoadRelaxed(m_iTrackLoading) == 0) ||
+            (trackLoaded && atomicLoadRelaxed(m_iTrackLoading) == 0 &&
                     m_playPos >= getTrackEndPosition() &&
                     queuedSeek.seekType == SEEK_NONE) ||
             m_pPassthroughEnabled->toBool()) {
@@ -1275,10 +1286,13 @@ void EngineBuffer::processTrackLocked(
 }
 
 void EngineBuffer::process(CSAMPLE* pOutput, const std::size_t bufferSize) {
-    // Bail if we receive a buffer size with incomplete sample frames. Assert in debug builds.
-    VERIFY_OR_DEBUG_ASSERT((bufferSize % m_channelCount) == 0) {
-        return;
-    }
+    process(pOutput, bufferSize, getChannelCount());
+}
+
+void EngineBuffer::process(CSAMPLE* pOutput,
+        const std::size_t bufferSize,
+        mixxx::audio::ChannelCount expectedChannelCount) {
+    const mixxx::AudioCallbackScope audioCallbackScope;
     m_pReader->process();
     // Steps:
     // - Lookup new reader information
@@ -1290,17 +1304,24 @@ void EngineBuffer::process(CSAMPLE* pOutput, const std::size_t bufferSize) {
     // - Set last sample value (m_fLastSampleValue) so that rampOut works? Other
     //   miscellaneous upkeep issues.
 
-    m_sampleRate = mixxx::audio::SampleRate::fromDouble(m_pSampleRate->get());
-    m_callbackKeylockScale = m_pScaleKeylock.load(std::memory_order_acquire);
-
-    m_pScaleLinear->setSignal(m_sampleRate, m_channelCount);
-    m_pScaleSignalsmith->setSignal(m_sampleRate, m_channelCount);
-
-    if (isTrackLoaded() && m_pause.tryLock()) {
-        processTrackLocked(pOutput, bufferSize, m_sampleRate);
-        // release the pauselock
+    bool processed = false;
+    if (m_pause.tryLock()) {
+        if (isTrackLoaded() && expectedChannelCount.isValid() &&
+                m_channelCount == expectedChannelCount &&
+                bufferSize % expectedChannelCount == 0) {
+            m_sampleRate = mixxx::audio::SampleRate::fromDouble(m_pSampleRate->get());
+            m_callbackKeylockScale = m_pScaleKeylock.load(std::memory_order_acquire);
+            m_pScaleLinear->setSignal(m_sampleRate, m_channelCount);
+            m_pScaleSignalsmith->setSignal(m_sampleRate, m_channelCount);
+            processTrackLocked(pOutput, bufferSize, m_sampleRate);
+            processed = true;
+        }
+        if (!processed) {
+            m_naturalRateOld = 0;
+        }
         m_pause.unlock();
-    } else {
+    }
+    if (!processed) {
         // We are loading a new Track
 
         // Here the old track was playing and loading the new track is in
@@ -1320,7 +1341,6 @@ void EngineBuffer::process(CSAMPLE* pOutput, const std::size_t bufferSize) {
         SampleUtil::clear(pOutput, bufferSize);
 
         m_rate_old = 0;
-        m_naturalRateOld = 0;
         m_speed_old = 0;
         m_actual_speed = 0;
         m_renderedIndicatorSpeed = 0;
@@ -1355,8 +1375,7 @@ void EngineBuffer::processSlip(std::size_t bufferSize) {
             if (m_slipQuitAndAdopt.fetchAndStoreAcquire(0) == 0 &&
                     m_slipPos.toNearestFrameBoundary() !=
                             m_playPos.toNearestFrameBoundary()) {
-                // TODO(owen) assuming that looping will get canceled properly
-                doSeekPlayPos(m_slipPos.toNearestFrameBoundary(), SEEK_SLIP_RESTORE);
+                m_pendingSlipRestorePosition = m_slipPos.toNearestFrameBoundary();
             }
             m_slipPos = mixxx::audio::kStartFramePos;
         }
@@ -1428,7 +1447,16 @@ void EngineBuffer::processSyncRequests() {
 void EngineBuffer::processSeek(bool paused) {
     m_previousBufferSeek = false;
 
-    const QueuedSeek queuedSeek = m_queuedSeek.getValue();
+    QueuedSeek queuedSeek = m_queuedSeek.getValue();
+    if (queuedSeek.seekType == SEEK_NONE && m_pendingSlipRestorePosition.isValid()) {
+        queuedSeek = {m_pendingSlipRestorePosition, SEEK_SLIP_RESTORE};
+#ifdef __VINYLCONTROL__
+        if (m_pVinylControlControl) {
+            m_pVinylControlControl->notifySeekQueued();
+        }
+#endif
+    }
+    m_pendingSlipRestorePosition = mixxx::audio::kInvalidFramePos;
 
     SeekRequests seekType = queuedSeek.seekType;
     mixxx::audio::FramePos position = queuedSeek.position;
@@ -1698,10 +1726,11 @@ void EngineBuffer::addControl(EngineControl* pControl) {
 }
 
 bool EngineBuffer::isTrackLoaded() const {
-    return (m_pCurrentTrack && m_iTrackLoading.loadAcquire() == 0);
+    return m_iTrackLoading.loadAcquire() == 0 && m_pTrackLoaded->toBool();
 }
 
 TrackPointer EngineBuffer::getLoadedTrack() const {
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
     return m_pCurrentTrack;
 }
 
@@ -1737,12 +1766,20 @@ void EngineBuffer::collectFeatures(GroupFeatureState* pGroupFeatures) const {
 }
 
 void EngineBuffer::slotUpdatedTrackBeats() {
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
     TrackPointer pTrack = m_pCurrentTrack;
     if (pTrack) {
+        const auto pBeats = pTrack->getBeats();
         for (const auto& pControl : std::as_const(m_engineControls)) {
-            pControl->trackBeatsUpdated(pTrack->getBeats());
+            pControl->trackBeatsUpdated(pBeats);
         }
     }
+}
+
+void EngineBuffer::slotUpdatedTrackBpmLock() {
+    const auto notificationLock = lockMutex(&m_trackNotificationMutex);
+    const auto pTrack = m_pCurrentTrack;
+    m_pBpmControl->trackBpmLockChanged(pTrack && pTrack->isBpmLocked());
 }
 
 void EngineBuffer::setScalerForTest(

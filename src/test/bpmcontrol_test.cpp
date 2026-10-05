@@ -55,3 +55,26 @@ TEST_F(BpmControlTest, BeatContext_BeatGrid) {
     EXPECT_DOUBLE_EQ(expectedBeatLengthFrames, beatLengthFrames);
     EXPECT_DOUBLE_EQ(0.0, beatPercentage);
 }
+
+TEST_F(BpmControlTest, BeatContextSnapshotSurvivesBeatGridReplacement) {
+    BpmControl::BeatsSnapshot snapshot;
+    const auto sampleRate = mixxx::audio::SampleRate(44100);
+    snapshot.publish(mixxx::Beats::fromConstTempo(
+            sampleRate, mixxx::audio::kStartFramePos, mixxx::Bpm(60.0)));
+    const auto oldBeats = snapshot.acquire();
+    snapshot.publish(mixxx::Beats::fromConstTempo(
+            sampleRate, mixxx::audio::kStartFramePos, mixxx::Bpm(120.0)));
+    const auto newBeats = snapshot.acquire();
+    mixxx::audio::FrameDiff_t oldBeatLength = 0;
+    mixxx::audio::FrameDiff_t newBeatLength = 0;
+    ASSERT_TRUE(BpmControl::getBeatContext(oldBeats.get(),
+            mixxx::audio::kStartFramePos, nullptr, nullptr, &oldBeatLength, nullptr));
+    ASSERT_TRUE(BpmControl::getBeatContext(newBeats.get(),
+            mixxx::audio::kStartFramePos, nullptr, nullptr, &newBeatLength, nullptr));
+    EXPECT_DOUBLE_EQ(oldBeatLength, 44100.0);
+    EXPECT_DOUBLE_EQ(newBeatLength, 22050.0);
+    snapshot.publish(nullptr);
+    const auto empty = snapshot.acquire();
+    EXPECT_FALSE(BpmControl::getBeatContext(empty.get(),
+            mixxx::audio::kStartFramePos, nullptr, nullptr, nullptr, nullptr));
+}

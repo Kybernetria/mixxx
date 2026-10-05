@@ -8,6 +8,7 @@
 #include "engine/controls/enginecontrol.h"
 #include "engine/sync/syncable.h"
 #include "track/beats.h"
+#include "util/immutableaudiosnapshot.h"
 #include "util/tapfilter.h"
 
 class ControlEncoder;
@@ -21,6 +22,12 @@ class BpmControl : public EngineControl {
     Q_OBJECT
 
   public:
+    using BeatsSnapshot = mixxx::ImmutableAudioSnapshot<mixxx::Beats>;
+
+    BeatsSnapshot::ReadGuard acquireBeats() const {
+        return m_beatsSnapshot.acquire();
+    }
+
     BpmControl(const QString& group, UserSettingsPointer pConfig);
 
     mixxx::Bpm getBpm() const;
@@ -72,6 +79,12 @@ class BpmControl : public EngineControl {
     // lies within the current beat). Returns false if a previous or next beat
     // does not exist. NULL arguments are safe and ignored.
     static bool getBeatContext(const mixxx::BeatsPointer& pBeats,
+            mixxx::audio::FramePos position,
+            mixxx::audio::FramePos* pPrevBeatPosition,
+            mixxx::audio::FramePos* pNextBeatPosition,
+            mixxx::audio::FrameDiff_t* pBeatLengthFrames,
+            double* pBeatPercentage);
+    static bool getBeatContext(const mixxx::Beats* pBeats,
             mixxx::audio::FramePos position,
             mixxx::audio::FramePos* pPrevBeatPosition,
             mixxx::audio::FramePos* pNextBeatPosition,
@@ -195,8 +208,7 @@ class BpmControl : public EngineControl {
     double m_dSyncInstantaneousBpm;
     double m_dLastSyncAdjustment;
 
-    // m_pBeats is written from an engine worker thread
-    mixxx::BeatsPointer m_pBeats;
+    BeatsSnapshot m_beatsSnapshot;
 
     FRIEND_TEST(EngineSyncTest, UserTweakPreservedInSeek);
     FRIEND_TEST(EngineSyncTest, FollowerUserTweakPreservedInLeaderChange);

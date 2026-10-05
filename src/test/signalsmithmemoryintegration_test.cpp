@@ -778,6 +778,23 @@ TEST_F(SignalsmithMemoryIntegrationTest, ExactCueCancelsPendingSlipRecovery) {
     engine()->setKeylockPreparationPausedForTest(false);
 }
 
+TEST_F(SignalsmithMemoryIntegrationTest, ExactCueQueuedBeforeSlipReleaseKeepsPriority) {
+    ASSERT_TRUE(startSteadyPlayback());
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 1);
+    process();
+    engine()->setKeylockPreparationPausedForTest(true);
+    engine()->seekExact(FramePos(100000));
+    process();
+    ControlObject::set(ConfigKey(m_sGroup1, "slip_enabled"), 0);
+    engine()->seekExact(FramePos(5001));
+    for (int i = 0; i < 12; ++i) {
+        process();
+        EXPECT_EQ(FramePos(5001), engine()->getExactPlayPos());
+        EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
+    }
+    engine()->setKeylockPreparationPausedForTest(false);
+}
+
 TEST_F(SignalsmithMemoryIntegrationTest, PausedSlipRestoreKeepsExactAnchorWithoutLiveDebt) {
     ASSERT_TRUE(startSteadyPlayback());
     ControlObject::set(ConfigKey(m_sGroup1, "play"), 0);
