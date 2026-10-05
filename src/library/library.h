@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 #include <QFont>
 #include <QList>
 #include <QObject>
@@ -28,6 +30,7 @@ class MixxxLibraryFeature;
 class PlayerManager;
 class PlaylistFeature;
 class RecordingManager;
+class SetlogFeature;
 class SidebarModel;
 class TrackCollectionManager;
 class WSearchLineEdit;
@@ -203,6 +206,7 @@ class Library: public QObject {
     parented_ptr<CrateFeature> m_pCrateFeature;
     parented_ptr<BrowseFeature> m_pBrowseFeature;
     parented_ptr<AnalysisFeature> m_pAnalysisFeature;
+    std::unique_ptr<SetlogFeature> m_pSetlogFeature;
     QFont m_trackTableFont;
     int m_iTrackTableRowHeight;
     bool m_editMetadataSelectedClick;

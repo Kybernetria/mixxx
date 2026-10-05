@@ -1,6 +1,7 @@
 #include "controllers/scripting/colormapperjsproxy.h"
 
 #include <gtest/gtest.h>
+#include <memory>
 
 #include <QJSEngine>
 
@@ -8,8 +9,8 @@
 
 namespace {
 
-QJSEngine* createScriptEngine() {
-    QJSEngine* pEngine = new QJSEngine();
+std::unique_ptr<QJSEngine> createScriptEngine() {
+    auto pEngine = std::make_unique<QJSEngine>();
     QJSValue mapper = pEngine->newQMetaObject(&ColorMapperJSProxy::staticMetaObject);
     pEngine->globalObject().setProperty("ColorMapper", mapper);
     return pEngine;
@@ -20,7 +21,7 @@ QJSEngine* createScriptEngine() {
 class ColorMapperJSProxyTest : public MixxxTest {};
 
 TEST_F(ColorMapperJSProxyTest, GetNearestColor) {
-    QJSEngine* pEngine = createScriptEngine();
+    auto pEngine = createScriptEngine();
     QJSValue jsval = pEngine->evaluate(
             R"JavaScript(
            var mapper = new ColorMapper({
@@ -58,7 +59,7 @@ TEST_F(ColorMapperJSProxyTest, GetNearestColor) {
 }
 
 TEST_F(ColorMapperJSProxyTest, GetNearestValue) {
-    QJSEngine* pEngine = createScriptEngine();
+    auto pEngine = createScriptEngine();
     QJSValue jsval = pEngine->evaluate(
             R"JavaScript(
            var mapper = new ColorMapper({

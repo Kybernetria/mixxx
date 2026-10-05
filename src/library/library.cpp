@@ -149,7 +149,8 @@ Library::Library(
 
     addFeature(new RecordingFeature(this, m_pConfig, pRecordingManager));
 
-    addFeature(new SetlogFeature(this, UserSettingsPointer(m_pConfig)));
+    m_pSetlogFeature = std::make_unique<SetlogFeature>(this, UserSettingsPointer(m_pConfig));
+    addFeature(m_pSetlogFeature.get());
 
     m_pAnalysisFeature = make_parented<AnalysisFeature>(this, m_pConfig);
     connect(m_pPlaylistFeature,
@@ -273,6 +274,7 @@ Library::Library(
 }
 
 Library::~Library() {
+    m_pSetlogFeature.reset();
     DateFormatChangedBroadcaster::destroy();
 }
 

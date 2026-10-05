@@ -11,7 +11,9 @@
 #include "engine/enginemixer.h"
 #include "library/coverartcache.h"
 #include "library/library.h"
+#include "library/trackcollection.h"
 #include "library/trackcollectionmanager.h"
+#include "library/trackset/setlogfeature.h"
 #include "mixer/basetrackplayer.h"
 #include "mixer/deck.h"
 #include "mixer/playerinfo.h"
@@ -129,6 +131,40 @@ class PlayerManagerTest : public MixxxDbTest, SoundSourceProviderRegistration {
     std::shared_ptr<RecordingManager> m_pRecordingManager;
     std::shared_ptr<Library> m_pLibrary;
 };
+
+TEST_F(PlayerManagerTest, LibraryDestructionFinishesHistoryWhileLibraryIsAlive) {
+    auto& playlistDao = m_pTrackCollectionManager->internalCollection()->getPlaylistDAO();
+    const int shortHistory = playlistDao.createPlaylist(
+            QStringLiteral("Short history"), PlaylistDAO::PLHT_SET_LOG);
+    const int lockedHistory = playlistDao.createPlaylist(
+            QStringLiteral("Locked history"), PlaylistDAO::PLHT_SET_LOG);
+    ASSERT_NE(kInvalidPlaylistId, shortHistory);
+    ASSERT_NE(kInvalidPlaylistId, lockedHistory);
+    ASSERT_TRUE(playlistDao.setPlaylistLocked(lockedHistory, true));
+    const auto placeholders = playlistDao.getPlaylists(PlaylistDAO::PLHT_UNKNOWN);
+    ASSERT_FALSE(placeholders.isEmpty());
+
+    auto* pLibrary = m_pLibrary.get();
+    auto* pHistory = pLibrary->findChild<SetlogFeature*>();
+    ASSERT_NE(nullptr, pHistory);
+    bool historyDestroyedWithLiveLibrary = false;
+    QObject::connect(pHistory, &QObject::destroyed, pLibrary, [&] {
+        historyDestroyedWithLiveLibrary = true;
+        EXPECT_EQ(m_pTrackCollectionManager.get(), pLibrary->trackCollectionManager());
+    });
+
+    m_pSoundManager.reset();
+    m_pPlayerManager.reset();
+    PlayerInfo::destroy();
+    m_pLibrary.reset();
+
+    EXPECT_TRUE(historyDestroyedWithLiveLibrary);
+    EXPECT_FALSE(playlistDao.playlistExists(shortHistory));
+    EXPECT_TRUE(playlistDao.playlistExists(lockedHistory));
+    for (const auto& placeholder : placeholders) {
+        EXPECT_FALSE(playlistDao.playlistExists(placeholder.first));
+    }
+}
 
 TEST_F(PlayerManagerTest, UnEjectTest) {
     // Ejecting an empty deck with no previously-recorded ejected track has no effect.
