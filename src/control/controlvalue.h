@@ -34,10 +34,10 @@ class ControlRingValue {
     // This operation can be repeated multiple times for the same
     // slot, because the stored value is preserved.
     bool tryGet(T* value) const {
-        auto slots = m_readerSlots.load(std::memory_order_relaxed);
-        for (int attempt = 0; attempt < 8 && slots != 0; ++attempt) {
-            if (m_readerSlots.compare_exchange_weak(slots,
-                        slots - 1,
+        auto availableReaderSlots = m_readerSlots.load(std::memory_order_relaxed);
+        for (int attempt = 0; attempt < 8 && availableReaderSlots != 0; ++attempt) {
+            if (m_readerSlots.compare_exchange_weak(availableReaderSlots,
+                        availableReaderSlots - 1,
                         std::memory_order_acquire,
                         std::memory_order_relaxed)) {
                 *value = m_value;

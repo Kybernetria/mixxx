@@ -1,3 +1,5 @@
+#include <QObject>
+
 #include "control/controlvalue.h"
 
 #include <gtest/gtest.h>
