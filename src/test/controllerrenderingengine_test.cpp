@@ -31,14 +31,17 @@ class ControllerRenderingEngineTest : public MixxxTest {
 
 class MockRenderingEngine : public ControllerRenderingEngine {
   public:
-    MockRenderingEngine(const LegacyControllerMapping::ScreenInfo& info)
-            : ControllerRenderingEngine(info, new ControllerEngineThreadControl){};
+    MockRenderingEngine(const LegacyControllerMapping::ScreenInfo& info,
+            ControllerEngineThreadControl* engineThreadControl)
+            : ControllerRenderingEngine(info, engineThreadControl) {
+    }
 };
 
 TEST_F(ControllerRenderingEngineTest, createValidRendererWithSupportedTypes) {
     const auto& supportedPixelFormats = supportedPixelFormat();
     for (const auto& pixelFormat : supportedPixelFormats) {
-        MockRenderingEngine screenTest(LegacyControllerMapping::ScreenInfo{
+        ControllerEngineThreadControl engineThreadControl;
+        const LegacyControllerMapping::ScreenInfo screenInfo{
                 "",                                                    // identifier
                 QSize(0, 0),                                           // size
                 10,                                                    // target_fps
@@ -48,7 +51,8 @@ TEST_F(ControllerRenderingEngineTest, createValidRendererWithSupportedTypes) {
                 LegacyControllerMapping::ScreenInfo::ColorEndian::Big, // endian
                 false,                                                 // reversedColor
                 false                                                  // rawData
-        });
+        };
+        MockRenderingEngine screenTest(screenInfo, &engineThreadControl);
         EXPECT_TRUE(screenTest.isValid());
         EXPECT_TRUE(screenTest.stop());
     }
