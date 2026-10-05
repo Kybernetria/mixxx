@@ -2980,6 +2980,7 @@ if(BUILD_TESTING)
     #TODO: write useful tests for refactored effects system
     #src/test/effectchainslottest.cpp
     src/test/enginebufferscalelineartest.cpp
+    src/test/enginebufferscalelinearallocation_test.cpp
     src/test/enginebufferscalesignalsmithtest.cpp
     src/test/engineworkerscheduler_test.cpp
     src/test/callbackallocationcheck.cpp

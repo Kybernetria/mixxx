@@ -25,6 +25,8 @@ class EngineBufferScaleLinear : public EngineBufferScale  {
                              double* pPitchRatio) override;
 
   private:
+    friend class EngineBufferScaleLinearAllocationTest;
+
     void onSignalChanged() override;
 
     double do_scale(CSAMPLE* buf, SINT buf_size);

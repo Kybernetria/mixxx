@@ -2,6 +2,7 @@
 
 #include <QtDebug>
 
+#include "engine/engine.h"
 #include "engine/readaheadmanager.h"
 #include "moc_enginebufferscalelinear.cpp"
 #include "util/assert.h"
@@ -12,6 +13,9 @@ EngineBufferScaleLinear::EngineBufferScaleLinear(ReadAheadManager *pReadAheadMan
     : m_pReadAheadManager(pReadAheadManager),
       m_bufferInt(SampleUtil::alloc(kiLinearScaleReadAheadLength)),
       m_bufferIntSize(0),
+      m_floorSampleOld(mixxx::kMaxEngineChannelInputCount),
+      m_floorSample(mixxx::kMaxEngineChannelInputCount),
+      m_ceilSample(mixxx::kMaxEngineChannelInputCount),
       m_bClear(false),
       m_dRate(1.0),
       m_dOldRate(1.0),
@@ -26,20 +30,7 @@ EngineBufferScaleLinear::~EngineBufferScaleLinear() {
 }
 
 void EngineBufferScaleLinear::onSignalChanged() {
-    // We only upscale the memory allocation to reduce the likelihood of
-    // impacting the real-time thread. This way, on first load of a STEM (8
-    // channels), we reallocate the right size and keep it allocated till the
-    // scaler is destroyed.
-    const auto channelCount = getOutputSignal().getChannelCount();
-    if (m_floorSampleOld.size() < channelCount) {
-        m_floorSampleOld = mixxx::SampleBuffer(channelCount);
-    }
-    if (m_floorSample.size() < channelCount) {
-        m_floorSample = mixxx::SampleBuffer(channelCount);
-    }
-    if (m_ceilSample.size() < channelCount) {
-        m_ceilSample = mixxx::SampleBuffer(channelCount);
-    }
+    DEBUG_ASSERT(getOutputSignal().getChannelCount() <= mixxx::kMaxEngineChannelInputCount);
 }
 
 void EngineBufferScaleLinear::setScaleParameters(double base_rate,
@@ -75,6 +66,11 @@ inline float hermite4(float frac_pos, float xm1, float x0, float x1, float x2)
 double EngineBufferScaleLinear::scaleBuffer(
         CSAMPLE* pOutputBuffer,
         SINT iOutputBufferSize) {
+    VERIFY_OR_DEBUG_ASSERT(getOutputSignal().getChannelCount().isValid() &&
+            getOutputSignal().getChannelCount() <= mixxx::kMaxEngineChannelInputCount) {
+        SampleUtil::clear(pOutputBuffer, iOutputBufferSize);
+        return 0.0;
+    }
     if (iOutputBufferSize == 0) {
         return 0.0;
     }
