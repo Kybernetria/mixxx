@@ -509,15 +509,18 @@ mixxx::BeatsPointer Track::getBeats() const {
 }
 
 void Track::undoBeatsChange() {
-    if (!canUndoBeatsChange()) {
+    auto locked = lockMutex(&m_qMutex);
+    if (m_pBeatsUndoStack.isEmpty()) {
         return;
     }
 
-    auto locked = lockMutex(&m_qMutex);
     m_undoingBeatsChange = true;
     const auto pPrevBeats = m_pBeatsUndoStack.pop();
-    trySetBeats(pPrevBeats);
+    const bool changed = trySetBeatsWhileLocked(pPrevBeats, false);
     m_undoingBeatsChange = false;
+    if (changed) {
+        afterBeatsAndBpmUpdated(&locked);
+    }
 }
 
 void Track::afterBeatsAndBpmUpdated(

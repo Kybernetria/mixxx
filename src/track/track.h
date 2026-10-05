@@ -400,6 +400,7 @@ class Track : public QObject {
 
     void undoBeatsChange();
     bool canUndoBeatsChange() const {
+        const auto locked = lockMutex(&m_qMutex);
         return !m_pBeatsUndoStack.isEmpty();
     }
 

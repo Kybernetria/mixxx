@@ -1,9 +1,14 @@
+#include <chrono>
+#include <future>
+#include <thread>
+
 #include <QtDebug>
 
 #include "library/coverart.h"
 #include "sources/soundsourceproxy.h"
 #include "test/mixxxtest.h"
 #include "test/soundsourceproviderregistration.h"
+#include "track/beats.h"
 #include "track/track.h"
 
 // Test for updating track metadata and cover art from files.
@@ -50,6 +55,35 @@ class TrackUpdateTest : public MixxxTest, SoundSourceProviderRegistration {
         return pTrack;
     }
 };
+
+TEST_F(TrackUpdateTest, UndoBeatsChangeEmitsAfterReleasingTrackMutex) {
+    auto pTrack = newTestTrack();
+    const auto previousBeats = mixxx::Beats::fromConstTempo(
+            mixxx::audio::SampleRate(48000), mixxx::audio::kStartFramePos, mixxx::Bpm(120));
+    ASSERT_TRUE(pTrack->trySetBeats(previousBeats));
+    std::this_thread::sleep_for(std::chrono::milliseconds(810));
+    const auto currentBeats = mixxx::Beats::fromConstTempo(
+            mixxx::audio::SampleRate(48000), mixxx::audio::kStartFramePos, mixxx::Bpm(100));
+    ASSERT_TRUE(pTrack->trySetBeats(currentBeats));
+    ASSERT_TRUE(pTrack->canUndoBeatsChange());
+
+    std::promise<mixxx::BeatsPointer> observedBeats;
+    auto observation = observedBeats.get_future();
+    std::thread reader;
+    QObject::connect(pTrack.get(), &Track::beatsUpdated, pTrack.get(), [&] {
+        reader = std::thread([&] {
+            observedBeats.set_value(pTrack->getBeats());
+        });
+        EXPECT_EQ(std::future_status::ready, observation.wait_for(std::chrono::seconds(1)));
+    }, Qt::DirectConnection);
+
+    pTrack->undoBeatsChange();
+
+    ASSERT_TRUE(reader.joinable());
+    reader.join();
+    EXPECT_EQ(previousBeats, observation.get());
+    EXPECT_FALSE(pTrack->canUndoBeatsChange());
+}
 
 TEST_F(TrackUpdateTest, parseModifiedCleanOnce) {
     auto pTrack = newTestTrackParsedModified();
