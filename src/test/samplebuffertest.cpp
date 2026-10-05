@@ -83,6 +83,39 @@ TEST_F(ReadAheadSampleBufferTest, emptyWithCapacity) {
     EXPECT_TRUE(sampleBuffer.empty());
 }
 
+TEST_F(ReadAheadSampleBufferTest, copyAndResizeEmptyBuffer) {
+    const mixxx::ReadAheadSampleBuffer empty;
+    mixxx::ReadAheadSampleBuffer sampleBuffer(empty);
+    EXPECT_TRUE(sampleBuffer.empty());
+    EXPECT_EQ(0, sampleBuffer.capacity());
+
+    sampleBuffer.adjustCapacity(kCapacity);
+    EXPECT_TRUE(sampleBuffer.empty());
+    EXPECT_EQ(kCapacity, sampleBuffer.writableLength());
+    EXPECT_EQ(kCapacity, growAndWrite(&sampleBuffer, kCapacity));
+    EXPECT_EQ(kCapacity, shrinkForReadingAndVerify(&sampleBuffer, kCapacity));
+
+    sampleBuffer.adjustCapacity(0);
+    EXPECT_TRUE(sampleBuffer.empty());
+    EXPECT_EQ(0, sampleBuffer.capacity());
+}
+
+TEST_F(ReadAheadSampleBufferTest, resizePreservesUnreadSamples) {
+    mixxx::ReadAheadSampleBuffer sampleBuffer(kCapacity);
+    ASSERT_EQ(kCapacity, growAndWrite(&sampleBuffer, kCapacity));
+    ASSERT_EQ(30, shrinkForReadingAndVerify(&sampleBuffer, 30));
+
+    sampleBuffer.adjustCapacity(1);
+    EXPECT_EQ(kCapacity - 30, sampleBuffer.capacity());
+    EXPECT_EQ(0, sampleBuffer.writableLength());
+
+    sampleBuffer.adjustCapacity(kCapacity + 10);
+    EXPECT_EQ(kCapacity - 30, sampleBuffer.readableLength());
+    EXPECT_EQ(40, sampleBuffer.writableLength());
+    EXPECT_EQ(40, growAndWrite(&sampleBuffer, 40));
+    EXPECT_EQ(kCapacity + 10, shrinkForReadingAndVerify(&sampleBuffer, kCapacity + 10));
+}
+
 TEST_F(ReadAheadSampleBufferTest, readWriteTrim) {
     mixxx::ReadAheadSampleBuffer sampleBuffer(kCapacity);
 

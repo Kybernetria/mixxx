@@ -5,6 +5,9 @@
 
 #include "analyzer/analyzersilence.h"
 #include "sources/audiosourcestereoproxy.h"
+#ifdef __MAD__
+#include "sources/soundsourcemp3.h"
+#endif
 #include "sources/soundsourceproxy.h"
 #include "test/mixxxtest.h"
 #include "test/soundsourceproviderregistration.h"
@@ -1149,6 +1152,17 @@ TEST_F(SoundSourceProxyTest, freeModeGarbage) {
         break;
     }
 }
+
+#ifdef __MAD__
+TEST_F(SoundSourceProxyTest, madRecoversFromInvalidHeadersBeforeAudio) {
+    const auto filePath = getTestDir().filePath(
+            QStringLiteral("id3-test-data/free_mode_garbage.mp3"));
+    const auto pAudioSource = openAudioSource(
+            filePath, std::make_shared<mixxx::SoundSourceProviderMp3>());
+    ASSERT_NE(nullptr, pAudioSource);
+    EXPECT_GT(pAudioSource->frameLength(), 0);
+}
+#endif
 
 TEST_F(SoundSourceProxyTest, taglibStringToEnumFileType) {
     const QStringList fileTypes = SoundSourceProxy::getSupportedFileTypes();

@@ -3,6 +3,30 @@
 
 #include "util/performancetimer.h"
 
+TEST(PerformanceTimerTest, StoppedTimerElapsedIsZero) {
+    PerformanceTimer timer;
+    EXPECT_FALSE(timer.running());
+    EXPECT_EQ(0, timer.elapsed().toIntegerNanos());
+    EXPECT_FALSE(timer.running());
+}
+
+TEST(PerformanceTimerTest, RestartStartsStoppedTimer) {
+    PerformanceTimer timer;
+    EXPECT_EQ(0, timer.restart().toIntegerNanos());
+    EXPECT_TRUE(timer.running());
+    EXPECT_GE(timer.elapsed().toIntegerNanos(), 0);
+    EXPECT_GE(timer.restart().toIntegerNanos(), 0);
+}
+
+TEST(PerformanceTimerTest, DifferenceWithStoppedTimerIsZero) {
+    PerformanceTimer stopped;
+    PerformanceTimer running;
+    running.start();
+    EXPECT_EQ(0, stopped.difference(running).toIntegerNanos());
+    EXPECT_EQ(0, running.difference(stopped).toIntegerNanos());
+    EXPECT_EQ(0, stopped.difference(stopped).toIntegerNanos());
+}
+
 // This test was added because of an signed/unsigned underflow bug that
 // affected Windows and (presumably) Symbian.
 // See https://github.com/mixxxdj/mixxx/issues/7397

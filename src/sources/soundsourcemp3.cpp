@@ -90,21 +90,6 @@ constexpr SINT kMaxMp3FramesPerSecond = 39; // fixed: 1 MP3 frame = 26 ms -> ~ 1
 constexpr SINT kSeekFrameListCapacity =
         kMinutesPerFile * kSecondsPerMinute * kMaxMp3FramesPerSecond;
 
-inline QString formatHeaderFlags(int headerFlags) {
-    return QString("0x%1").arg(headerFlags, 4, 16, QLatin1Char('0'));
-}
-
-void logFrameHeader(QDebug logger, const mad_header& madHeader) {
-    logger << "MP3 frame header |"
-           << "layer:" << madHeader.layer
-           << "mode:" << madHeader.mode
-           << "#channels:" << MAD_NCHANNELS(&madHeader)
-           << "#samples:" << MAD_NSBSAMPLES(&madHeader)
-           << "bitrate:" << madHeader.bitrate
-           << "samplerate:" << madHeader.samplerate
-           << "flags:" << formatHeaderFlags(madHeader.flags);
-}
-
 bool isUnrecoverableError(mad_error error) {
     return (MAD_ERROR_NONE != error) && !MAD_RECOVERABLE(error);
 }
@@ -125,7 +110,7 @@ bool decodeFrameHeader(
         bool skipId3Tag) {
     DEBUG_ASSERT(!hasUnrecoverableError(pMadStream));
     int ret = mad_header_decode(pMadHeader, pMadStream);
-    if (pMadHeader->flags & MAD_FLAG_FREEFORMAT) {
+    if (ret == 0 && (pMadHeader->flags & MAD_FLAG_FREEFORMAT)) {
         // perform missing sanity check for Layer I and II
         // See libmad frame.c free_bitrate()
         if ((pMadHeader->layer == MAD_LAYER_I && pMadHeader->bitrate > 896000) ||
@@ -165,7 +150,6 @@ bool decodeFrameHeader(
         kLogger.info() << "Recoverable MP3 header decoding error:"
                        << mad_stream_errorstr(pMadStream)
                        << pMadStream->this_frame - pMadStream->buffer;
-        logFrameHeader(kLogger.info(), *pMadHeader);
         return false;
     }
     // Note: Recoverable errors are maintained until a frame has been successfully decoded

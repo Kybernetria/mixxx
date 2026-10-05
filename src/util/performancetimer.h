@@ -17,16 +17,24 @@ class PerformanceTimer {
     };
 
     mixxx::Duration elapsed() const {
+        if (!running()) {
+            return mixxx::Duration::empty();
+        }
         return mixxx::Duration::fromStdDuration(ClockT::now() - m_startTime);
     };
     mixxx::Duration restart() {
         const ClockT::time_point now = ClockT::now();
-        const auto dur = mixxx::Duration::fromStdDuration(now - m_startTime);
+        const auto dur = running()
+                ? mixxx::Duration::fromStdDuration(now - m_startTime)
+                : mixxx::Duration::empty();
         m_startTime = now;
         return dur;
     };
 
     mixxx::Duration difference(const PerformanceTimer& timer) const {
+        if (!running() || !timer.running()) {
+            return mixxx::Duration::empty();
+        }
         return mixxx::Duration::fromStdDuration(m_startTime - timer.m_startTime);
     };
     bool running() const {

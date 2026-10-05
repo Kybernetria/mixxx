@@ -28,11 +28,13 @@ ReadAheadSampleBuffer::ReadAheadSampleBuffer(
     DEBUG_ASSERT(that.readableLength() <= capacity);
     // Copy all readable contents to the beginning of the buffer
     // for maximizing the writable capacity.
-    SampleUtil::copy(
-        m_sampleBuffer.data(),
-        that.m_sampleBuffer.data(that.m_readableRange.start()),
-        that.readableLength());
-    m_readableRange.growBack(that.readableLength());
+    if (!that.empty()) {
+        SampleUtil::copy(
+                m_sampleBuffer.data(),
+                that.m_sampleBuffer.data(that.m_readableRange.start()),
+                that.readableLength());
+        m_readableRange.growBack(that.readableLength());
+    }
     
     DEBUG_ASSERT_CLASS_INVARIANT_ReadAheadSampleBuffer;
 }
