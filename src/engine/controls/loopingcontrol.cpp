@@ -12,12 +12,19 @@
 #include "moc_loopingcontrol.cpp"
 #include "preferences/usersettings.h"
 #include "track/track.h"
+#include "util/audiocallbackscope.h"
 #include "util/compatibility/qatomic.h"
 #include "util/make_const_iterator.h"
 #include "util/math.h"
 
 namespace {
 constexpr mixxx::audio::FrameDiff_t kMinimumAudibleLoopSizeFrames = 150;
+
+struct LoopCueCallbackContext {
+    const LoopingControl* control = nullptr;
+    std::uint64_t generation = 0;
+};
+thread_local LoopCueCallbackContext loopCueCallbackContext;
 
 // returns true if a is valid and is fairly close to target (within +/- 1 frame).
 bool positionNear(mixxx::audio::FramePos a, mixxx::audio::FramePos target) {
@@ -57,8 +64,7 @@ LoopingControl::LoopingControl(const QString& group,
           m_bAdjustingLoopInOld(false),
           m_bAdjustingLoopOutOld(false),
           m_bLoopOutPressedWhileLoopDisabled(false),
-          m_prevLoopSize(-1),
-          m_trueTrackBeats(false) {
+          m_prevLoopSize(-1) {
     m_currentPosition.setValue(mixxx::audio::kStartFramePos);
     m_pActiveBeatLoop = nullptr;
     m_pRateControl = nullptr;
@@ -257,9 +263,13 @@ LoopingControl::LoopingControl(const QString& group,
             &ControlObject::valueChanged,
             this,
             &LoopingControl::repeatToggled);
+    connect(&m_loopCueTimer, &QTimer::timeout, this, &LoopingControl::flushPendingLoopCue);
+    m_loopCueTimer.start(20);
 }
 
 LoopingControl::~LoopingControl() {
+    m_loopCueTimer.stop();
+    flushPendingLoopCue();
     // TODO Use unique_ptr to manage lifetime
     delete m_pLoopOutButton;
     delete m_pLoopOutGotoButton;
@@ -377,6 +387,12 @@ void LoopingControl::process(const double rate,
         mixxx::audio::FramePos currentPosition,
         const std::size_t bufferSize) {
     Q_UNUSED(bufferSize);
+    const mixxx::AudioCallbackScope audioCallbackScope;
+    const auto previousContext = loopCueCallbackContext;
+    loopCueCallbackContext = {this, m_loopCueGeneration.load()};
+    const auto restoreContext = qScopeGuard([previousContext] {
+        loopCueCallbackContext = previousContext;
+    });
 
     const auto previousPosition = m_currentPosition.getValue();
 
@@ -600,7 +616,8 @@ void LoopingControl::hintReader(gsl::not_null<HintVector*> pHintList) {
             pHintList->append(loop_hint);
         }
         // We anticipate a potential loop being set from its end point
-        mixxx::BeatsPointer pBeats = m_pBeats;
+        const auto beatState = m_beatsSnapshot.acquire();
+        const auto* pBeats = beatState ? beatState->beats.get() : nullptr;
         if (!pBeats) {
             return;
         }
@@ -676,15 +693,14 @@ void LoopingControl::setBeatLoop(mixxx::audio::FramePos startPosition, bool enab
         return;
     }
 
-    mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beatState = m_beatsSnapshot.acquire();
+    const auto* pBeats = beatState ? beatState->beats.get() : nullptr;
     if (!pBeats) {
         return;
     }
 
     double beatloopSize = m_pCOBeatLoopSize->get();
 
-    // TODO(XXX): This is not realtime safe. See this Zulip discussion for details:
-    // https://mixxx.zulipchat.com/#narrow/stream/109171-development/topic/getting.20locks.20out.20of.20Beats
     const auto endPosition = pBeats->findNBeatsFromPosition(startPosition, beatloopSize);
     if (endPosition.isValid()) {
         setLoop(startPosition, endPosition, enabled);
@@ -737,7 +753,8 @@ void LoopingControl::setLoop(mixxx::audio::FramePos startPosition,
 
 void LoopingControl::setLoopInToCurrentPosition() {
     // set loop-in position
-    const mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beatState = m_beatsSnapshot.acquire();
+    const auto* pBeats = beatState ? beatState->beats.get() : nullptr;
     LoopInfo loopInfo = m_loopInfo.getValue();
     mixxx::audio::FramePos quantizedBeatPosition;
     const FrameInfo info = frameInfo();
@@ -745,7 +762,7 @@ void LoopingControl::setLoopInToCurrentPosition() {
     // silence of the last buffer. This position might be not reachable in
     // a future runs, depending on the buffering.
     mixxx::audio::FramePos position = math_min(info.currentPosition, info.trackEndPosition);
-    if (quantizeEnabledAndHasTrueTrackBeats()) {
+    if (quantizeEnabledAndHasTrueTrackBeats(beatState.get())) {
         mixxx::audio::FramePos prevBeatPosition;
         mixxx::audio::FramePos nextBeatPosition;
         if (pBeats->findPrevNextBeats(position, &prevBeatPosition, &nextBeatPosition, false)) {
@@ -801,7 +818,7 @@ void LoopingControl::setLoopInToCurrentPosition() {
         loopInfo.seekMode = LoopSeekMode::MovedOut;
     }
 
-    if (quantizeEnabledAndHasTrueTrackBeats() &&
+    if (quantizeEnabledAndHasTrueTrackBeats(beatState.get()) &&
             loopInfo.startPosition.isValid() &&
             loopInfo.endPosition.isValid() &&
             loopInfo.startPosition < loopInfo.endPosition) {
@@ -882,7 +899,8 @@ void LoopingControl::slotLoopInGoto(double pressed) {
 }
 
 void LoopingControl::setLoopOutToCurrentPosition() {
-    mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beatState = m_beatsSnapshot.acquire();
+    const auto* pBeats = beatState ? beatState->beats.get() : nullptr;
     LoopInfo loopInfo = m_loopInfo.getValue();
     mixxx::audio::FramePos quantizedBeatPosition;
     FrameInfo info = frameInfo();
@@ -890,7 +908,7 @@ void LoopingControl::setLoopOutToCurrentPosition() {
     // silence of the last buffer. This position might be not reachable in
     // a future runs, depending on the buffering.
     mixxx::audio::FramePos position = math_min(info.currentPosition, info.trackEndPosition);
-    if (quantizeEnabledAndHasTrueTrackBeats()) {
+    if (quantizeEnabledAndHasTrueTrackBeats(beatState.get())) {
         mixxx::audio::FramePos prevBeatPosition;
         mixxx::audio::FramePos nextBeatPosition;
         if (pBeats->findPrevNextBeats(position, &prevBeatPosition, &nextBeatPosition, false)) {
@@ -954,7 +972,7 @@ void LoopingControl::setLoopOutToCurrentPosition() {
         loopInfo.seekMode = LoopSeekMode::MovedOut;
     }
 
-    if (quantizeEnabledAndHasTrueTrackBeats()) {
+    if (quantizeEnabledAndHasTrueTrackBeats(beatState.get())) {
         m_pCOBeatLoopSize->setAndConfirm(pBeats->numBeatsInRange(
                 loopInfo.startPosition, loopInfo.endPosition));
         updateBeatLoopingControls();
@@ -1194,6 +1212,12 @@ void LoopingControl::slotLoopEndPos(double positionSamples) {
 
 // This is called from the engine thread
 void LoopingControl::notifySeek(mixxx::audio::FramePos newPosition) {
+    const mixxx::AudioCallbackScope audioCallbackScope;
+    const auto previousContext = loopCueCallbackContext;
+    loopCueCallbackContext = {this, m_loopCueGeneration.load()};
+    const auto restoreContext = qScopeGuard([previousContext] {
+        loopCueCallbackContext = previousContext;
+    });
     // Leave loop alone if we're in slip mode and if it was turned on
     // by something that was not a rolling beatloop.
     if (m_pSlipEnabled->toBool() && !m_bLoopRollActive) {
@@ -1279,6 +1303,9 @@ void LoopingControl::repeatToggled(double value) {
 }
 
 void LoopingControl::trackLoaded(TrackPointer pNewTrack) {
+    const std::lock_guard<std::recursive_mutex> guard(m_loopCueMutex);
+    flushPendingLoopCue();
+    m_loopCueGeneration.fetch_add(1);
     invalidateTriggerPlan();
     m_pTrack = pNewTrack;
     mixxx::BeatsPointer pBeats;
@@ -1333,20 +1360,15 @@ void LoopingControl::trackLoaded(TrackPointer pNewTrack) {
 }
 
 void LoopingControl::trackBeatsUpdated(mixxx::BeatsPointer pBeats) {
+    const std::lock_guard<std::recursive_mutex> guard(m_loopCueMutex);
     invalidateTriggerPlan();
     clearActiveBeatLoop();
-    if (pBeats) {
-        m_pBeats = pBeats;
-        m_trueTrackBeats = true;
-    } else if (m_pTrack) {
-        // no beats, use fake beats so we can use seconds as beat unit
-        m_pBeats = getFake60BpmBeats();
-        m_trueTrackBeats = false;
-    } else {
-        // no track, no beats
-        m_pBeats = pBeats;
-        m_trueTrackBeats = false;
+    const bool trueTrackBeats = static_cast<bool>(pBeats);
+    if (!pBeats && m_pTrack) {
+        pBeats = getFake60BpmBeats();
     }
+    m_beatsSnapshot.publish(std::make_shared<const BeatState>(
+            BeatState{std::move(pBeats), trueTrackBeats}));
     LoopInfo loopInfo = m_loopInfo.getValue();
     if (loopInfo.startPosition.isValid() && loopInfo.endPosition.isValid()) {
         double loaded_loop_size = findBeatloopSizeForLoop(
@@ -1478,7 +1500,8 @@ void LoopingControl::clearActiveBeatLoop() {
 }
 
 bool LoopingControl::currentLoopMatchesBeatloopSize(const LoopInfo& loopInfo) const {
-    const mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beatState = m_beatsSnapshot.acquire();
+    const auto* pBeats = beatState ? beatState->beats.get() : nullptr;
     if (!pBeats) {
         return false;
     }
@@ -1495,13 +1518,19 @@ bool LoopingControl::currentLoopMatchesBeatloopSize(const LoopInfo& loopInfo) co
 }
 
 bool LoopingControl::quantizeEnabledAndHasTrueTrackBeats() const {
-    return m_pQuantizeEnabled->toBool() && m_trueTrackBeats;
+    const auto beatState = m_beatsSnapshot.acquire();
+    return quantizeEnabledAndHasTrueTrackBeats(beatState.get());
+}
+
+bool LoopingControl::quantizeEnabledAndHasTrueTrackBeats(const BeatState* state) const {
+    return m_pQuantizeEnabled->toBool() && state && state->beats && state->trueTrackBeats;
 }
 
 double LoopingControl::findBeatloopSizeForLoop(
         mixxx::audio::FramePos startPosition,
         mixxx::audio::FramePos endPosition) const {
-    const mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beatState = m_beatsSnapshot.acquire();
+    const auto* pBeats = beatState ? beatState->beats.get() : nullptr;
     if (!pBeats) {
         return -1;
     }
@@ -1540,7 +1569,7 @@ void LoopingControl::updateBeatLoopingControls() {
 }
 
 mixxx::audio::FramePos LoopingControl::findQuantizedBeatloopStart(
-        const mixxx::BeatsPointer& pBeats,
+        const mixxx::Beats* pBeats,
         mixxx::audio::FramePos currentPosition,
         double beats) const {
     // The closest beat might be ahead of play position and will cause a catching loop.
@@ -1611,7 +1640,8 @@ void LoopingControl::slotBeatLoop(double beats,
 
     FrameInfo info = frameInfo();
     const auto trackEndPosition = info.trackEndPosition;
-    const mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beatState = m_beatsSnapshot.acquire();
+    const auto* pBeats = beatState ? beatState->beats.get() : nullptr;
     if (!trackEndPosition.isValid() || !pBeats) {
         clearActiveBeatLoop();
         m_pCOBeatLoopSize->setAndConfirm(beats);
@@ -1656,7 +1686,7 @@ void LoopingControl::slotBeatLoop(double beats,
             currentPosition = pBeats->findNBeatsFromPosition(currentPosition, -beats);
         }
 
-        bool quantize = quantizeEnabledAndHasTrueTrackBeats();
+        bool quantize = quantizeEnabledAndHasTrueTrackBeats(beatState.get());
         // loop_in is set to the closest beat if quantize is on and the loop size is >= 1 beat.
         // The closest beat might be ahead of play position and will cause a catching loop.
         switch (loopAnchor) {
@@ -1847,7 +1877,8 @@ void LoopingControl::slotBeatLoopRollActivate(double pressed) {
 }
 
 void LoopingControl::slotBeatJump(double beats) {
-    const mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beatState = m_beatsSnapshot.acquire();
+    const auto* pBeats = beatState ? beatState->beats.get() : nullptr;
     if (!pBeats) {
         return;
     }
@@ -1907,7 +1938,8 @@ void LoopingControl::slotBeatJumpBackward(double pressed) {
 }
 
 void LoopingControl::slotLoopMove(double beats) {
-    const mixxx::BeatsPointer pBeats = m_pBeats;
+    const auto beatState = m_beatsSnapshot.acquire();
+    const auto* pBeats = beatState ? beatState->beats.get() : nullptr;
     if (!pBeats || beats == 0) {
         return;
     }
@@ -1951,6 +1983,39 @@ void LoopingControl::slotLoopMove(double beats) {
 }
 
 void LoopingControl::updateLoopCue(const LoopInfo& loopInfo) {
+    if (mixxx::AudioCallbackScope::isActive()) {
+        const auto generation = loopCueCallbackContext.control == this
+                ? loopCueCallbackContext.generation
+                : m_loopCueGeneration.load();
+        m_pendingLoopCue.setValue(
+                {loopInfo, generation, ++m_audioLoopCueSequence});
+        return;
+    }
+    const std::lock_guard<std::recursive_mutex> guard(m_loopCueMutex);
+    m_loopCueGeneration.fetch_add(1);
+    persistLoopCue(loopInfo);
+}
+
+void LoopingControl::flushPendingLoopCue() {
+    const std::lock_guard<std::recursive_mutex> guard(m_loopCueMutex);
+    PendingLoopCue pending;
+    if (!m_pendingLoopCue.tryGetValue(&pending) ||
+            pending.sequence == m_persistedLoopCueSequence) {
+        return;
+    }
+    m_persistedLoopCueSequence = pending.sequence;
+    if (pending.generation != m_loopCueGeneration.load()) {
+        return;
+    }
+    const auto currentLoop = m_loopInfo.getValue();
+    if (pending.loopInfo.startPosition != currentLoop.startPosition ||
+            pending.loopInfo.endPosition != currentLoop.endPosition) {
+        return;
+    }
+    persistLoopCue(pending.loopInfo);
+}
+
+void LoopingControl::persistLoopCue(const LoopInfo& loopInfo) {
     // Skip if we don't have a track.
     // Also skip in tests where we only have fake tracks w/o location.
     if (!m_pTrack || m_pTrack->getLocation().isEmpty()) {

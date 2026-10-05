@@ -2,14 +2,18 @@
 
 #include <QObject>
 #include <QStack>
+#include <QTimer>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 
 #include "control/controlvalue.h"
 #include "engine/controls/enginecontrol.h"
 #include "preferences/usersettings.h"
 #include "track/beats.h"
 #include "track/track_decl.h"
+#include "util/boundedatomicvalue.h"
+#include "util/immutableaudiosnapshot.h"
 
 class ControlPushButton;
 class ControlObject;
@@ -182,6 +186,10 @@ class LoopingControl : public EngineControl {
     void slotLoopEnabledValueChangeRequest(double enabled);
 
   private:
+    struct BeatState {
+        mixxx::BeatsPointer beats;
+        bool trueTrackBeats;
+    };
     friend class ReadAheadManagerTest;
     void setLoopingEnabled(bool enabled);
     void setLoopInfo(const LoopInfo& loopInfo);
@@ -195,12 +203,15 @@ class LoopingControl : public EngineControl {
     void storeLoopInfo();
     void restoreLoopInfo();
     void updateLoopCue(const LoopInfo& loopInfo);
+    void persistLoopCue(const LoopInfo& loopInfo);
+    void flushPendingLoopCue();
 
     void clearActiveBeatLoop();
     void clearLoopInfoAndControls();
     void updateBeatLoopingControls();
     bool currentLoopMatchesBeatloopSize(const LoopInfo& loopInfo) const;
     bool quantizeEnabledAndHasTrueTrackBeats() const;
+    bool quantizeEnabledAndHasTrueTrackBeats(const BeatState* state) const;
 
     // Fake beats that allow using looping/beatjump controls with no beats:
     // one 'beat' = one second
@@ -227,7 +238,7 @@ class LoopingControl : public EngineControl {
             mixxx::audio::FramePos newLoopInPosition,
             mixxx::audio::FramePos newLoopOutPosition);
     mixxx::audio::FramePos findQuantizedBeatloopStart(
-            const mixxx::BeatsPointer& pBeats,
+            const mixxx::Beats* pBeats,
             mixxx::audio::FramePos currentPosition,
             double beats) const;
 
@@ -293,10 +304,18 @@ class LoopingControl : public EngineControl {
 
     // objects below are written from an engine worker thread
     TrackPointer m_pTrack;
-    mixxx::BeatsPointer m_pBeats;
-    // Flag that allows to act quantized only if we have true track beats.
-    // See quantizeEnabledAndHasTrueTrackBeats()
-    bool m_trueTrackBeats;
+    struct PendingLoopCue {
+        LoopInfo loopInfo;
+        std::uint64_t generation = 0;
+        std::uint64_t sequence = 0;
+    };
+    BoundedAtomicValue<PendingLoopCue> m_pendingLoopCue{PendingLoopCue{}};
+    std::atomic<std::uint64_t> m_loopCueGeneration{0};
+    std::uint64_t m_audioLoopCueSequence = 0;
+    std::uint64_t m_persistedLoopCueSequence = 0;
+    std::recursive_mutex m_loopCueMutex;
+    QTimer m_loopCueTimer;
+    mixxx::ImmutableAudioSnapshot<BeatState> m_beatsSnapshot;
 
     friend class LoopingControlTest;
 };

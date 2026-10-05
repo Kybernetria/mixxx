@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <QScopedPointer>
+#include <QSignalSpy>
 #include <QtDebug>
+#include <array>
 #include <memory>
 
 #include "control/controlobject.h"
@@ -10,6 +12,8 @@
 #include "engine/controls/loopingcontrol.h"
 #include "mixxxtest.h"
 #include "test/mockedenginebackendtest.h"
+#include "track/track.h"
+#include "util/audiocallbackscope.h"
 
 namespace {
 
@@ -101,6 +105,50 @@ class LoopingControlTest : public MockedEngineBackendTest {
         ProcessBuffer();
     }
 
+    LoopingControl* loopingControl() {
+        return m_pChannel1->getEngineBuffer()->m_pLoopingControl;
+    }
+
+    void flushLoopCue() {
+        loopingControl()->flushPendingLoopCue();
+    }
+
+    CuePointer temporaryLoopCue(const TrackPointer& track) {
+        for (const auto& cue : track->getCuePoints()) {
+            if (cue->getType() == mixxx::CueType::Loop &&
+                    cue->getHotCue() == Cue::kNoHotCue) {
+                return cue;
+            }
+        }
+        return {};
+    }
+
+    void processHeldLoopIn(mixxx::audio::FramePos position) {
+        auto* control = loopingControl();
+        control->setFrameInfo(position, mixxx::audio::FramePos{5000},
+                mixxx::audio::SampleRate{44100});
+        control->process(1.0, position, 256);
+    }
+
+    void capturePendingLoopCue() {
+        ASSERT_TRUE(loopingControl()->m_pendingLoopCue.tryGetValue(&m_delayedLoopCue));
+    }
+
+    void publishDelayedLoopCue() {
+        ++m_delayedLoopCue.sequence;
+        loopingControl()->m_pendingLoopCue.setValue(m_delayedLoopCue);
+    }
+
+    auto acquireLoopBeats() {
+        return loopingControl()->m_beatsSnapshot.acquire();
+    }
+
+    bool loopHasQuantizedTrackBeats() {
+        return loopingControl()->quantizeEnabledAndHasTrueTrackBeats();
+    }
+
+    LoopingControl::PendingLoopCue m_delayedLoopCue;
+
     std::unique_ptr<PollingControlProxy> m_pNextBeat;
     std::unique_ptr<PollingControlProxy> m_pClosestBeat;
     std::unique_ptr<PollingControlProxy> m_pQuantizeEnabled;
@@ -140,6 +188,191 @@ class LoopingControlTest : public MockedEngineBackendTest {
     std::unique_ptr<PollingControlProxy> m_pButtonBeatLoopRoll2Activate;
     std::unique_ptr<PollingControlProxy> m_pButtonBeatLoopRoll4Activate;
 };
+
+TEST_F(LoopingControlTest, HeldLoopEndpointPersistsLatestStateOutsideCallback) {
+    const auto track = Track::newTemporary(QStringLiteral("/tmp/mixxx-held-loop.mp3"));
+    auto* control = loopingControl();
+    control->trackLoaded(track);
+    m_pQuantizeEnabled->set(0.0);
+    control->setLoop(mixxx::audio::FramePos{100}, mixxx::audio::FramePos{2000}, true);
+    const auto cue = temporaryLoopCue(track);
+    ASSERT_TRUE(cue);
+    m_pButtonLoopIn->set(1.0);
+
+    for (int position = 200; position <= 400; position += 10) {
+        processHeldLoopIn(mixxx::audio::FramePos{position});
+        EXPECT_EQ(mixxx::audio::FramePos{100}, cue->getStartAndEndPosition().startPosition);
+    }
+    EXPECT_EQ(mixxx::audio::FramePos{400}, control->getLoopInfo().startPosition);
+    EXPECT_FRAMEPOS_EQ_CONTROL(mixxx::audio::FramePos{400}, m_pLoopStartPoint);
+
+    flushLoopCue();
+    EXPECT_EQ(mixxx::audio::FramePos{400}, cue->getStartAndEndPosition().startPosition);
+    EXPECT_EQ(1, track->getCuePoints().size());
+    flushLoopCue();
+    EXPECT_EQ(1, track->getCuePoints().size());
+}
+
+TEST_F(LoopingControlTest, ClearAndReplacementRejectPendingCallbackLoopCue) {
+    const auto track = Track::newTemporary(QStringLiteral("/tmp/mixxx-replaced-loop.mp3"));
+    auto* control = loopingControl();
+    control->trackLoaded(track);
+    m_pQuantizeEnabled->set(0.0);
+    control->setLoop(mixxx::audio::FramePos{100}, mixxx::audio::FramePos{2000}, true);
+    m_pButtonLoopIn->set(1.0);
+    processHeldLoopIn(mixxx::audio::FramePos{400});
+    control->slotLoopRemove();
+    flushLoopCue();
+    EXPECT_FALSE(temporaryLoopCue(track));
+
+    control->setLoop(mixxx::audio::FramePos{100}, mixxx::audio::FramePos{2000}, true);
+    processHeldLoopIn(mixxx::audio::FramePos{500});
+    control->setLoop(mixxx::audio::FramePos{800}, mixxx::audio::FramePos{2400}, true);
+    flushLoopCue();
+    const auto cue = temporaryLoopCue(track);
+    ASSERT_TRUE(cue);
+    EXPECT_EQ(mixxx::audio::FramePos{800}, cue->getStartAndEndPosition().startPosition);
+    EXPECT_EQ(mixxx::audio::FramePos{2400}, cue->getStartAndEndPosition().endPosition);
+}
+
+TEST_F(LoopingControlTest, HeldLoopOutPersistsLatestStateOutsideCallback) {
+    const auto track = Track::newTemporary(QStringLiteral("/tmp/mixxx-held-loop-out.mp3"));
+    auto* control = loopingControl();
+    control->trackLoaded(track);
+    m_pQuantizeEnabled->set(0.0);
+    control->setLoop(mixxx::audio::FramePos{100}, mixxx::audio::FramePos{2000}, true);
+    const auto cue = temporaryLoopCue(track);
+    ASSERT_TRUE(cue);
+    m_pButtonLoopOut->set(1.0);
+    for (int position = 400; position <= 800; position += 20) {
+        processHeldLoopIn(mixxx::audio::FramePos{position});
+        EXPECT_EQ(mixxx::audio::FramePos{2000}, cue->getStartAndEndPosition().endPosition);
+    }
+    EXPECT_EQ(mixxx::audio::FramePos{800}, control->getLoopInfo().endPosition);
+    EXPECT_FRAMEPOS_EQ_CONTROL(mixxx::audio::FramePos{800}, m_pLoopEndPoint);
+    flushLoopCue();
+    EXPECT_EQ(mixxx::audio::FramePos{800}, cue->getStartAndEndPosition().endPosition);
+}
+
+TEST_F(LoopingControlTest, TimerPersistsCallbackEndpointChanges) {
+    const auto track = Track::newTemporary(QStringLiteral("/tmp/mixxx-timed-loop.mp3"));
+    auto* control = loopingControl();
+    control->trackLoaded(track);
+    m_pQuantizeEnabled->set(0.0);
+    control->setLoop(mixxx::audio::FramePos{100}, mixxx::audio::FramePos{2000}, true);
+    const auto cue = temporaryLoopCue(track);
+    ASSERT_TRUE(cue);
+    QSignalSpy cueUpdates(track.get(), &Track::cuesUpdated);
+    m_pButtonLoopIn->set(1.0);
+    processHeldLoopIn(mixxx::audio::FramePos{400});
+    EXPECT_EQ(0, cueUpdates.count());
+    EXPECT_EQ(mixxx::audio::FramePos{100}, cue->getStartAndEndPosition().startPosition);
+    ASSERT_TRUE(cueUpdates.wait(1000));
+    EXPECT_EQ(mixxx::audio::FramePos{400}, cue->getStartAndEndPosition().startPosition);
+}
+
+TEST_F(LoopingControlTest, SavedLoopActivationInCallbackDefersCueMutation) {
+    const auto track = Track::newTemporary(QStringLiteral("/tmp/mixxx-callback-loop.mp3"));
+    auto* control = loopingControl();
+    control->trackLoaded(track);
+    m_pQuantizeEnabled->set(0.0);
+    {
+        const mixxx::AudioCallbackScope audioCallbackScope;
+        control->setLoop(mixxx::audio::FramePos{100}, mixxx::audio::FramePos{2000}, true);
+        EXPECT_FALSE(temporaryLoopCue(track));
+    }
+    EXPECT_EQ(mixxx::audio::FramePos{100}, control->getLoopInfo().startPosition);
+    flushLoopCue();
+    ASSERT_TRUE(temporaryLoopCue(track));
+    EXPECT_EQ(mixxx::audio::FramePos{100},
+            temporaryLoopCue(track)->getStartAndEndPosition().startPosition);
+}
+
+TEST_F(LoopingControlTest, ReloadRejectsDelayedCallbackLoopCue) {
+    const auto track = Track::newTemporary(QStringLiteral("/tmp/mixxx-reloaded-loop.mp3"));
+    const auto replacement = Track::newTemporary(QStringLiteral("/tmp/mixxx-new-loop.mp3"));
+    auto* control = loopingControl();
+    control->trackLoaded(track);
+    m_pQuantizeEnabled->set(0.0);
+    control->setLoop(mixxx::audio::FramePos{100}, mixxx::audio::FramePos{2000}, true);
+    m_pButtonLoopIn->set(1.0);
+    processHeldLoopIn(mixxx::audio::FramePos{400});
+    capturePendingLoopCue();
+    control->trackLoaded(replacement);
+    publishDelayedLoopCue();
+    flushLoopCue();
+    EXPECT_FALSE(temporaryLoopCue(replacement));
+
+    control->trackLoaded(track);
+    control->slotLoopRemove();
+    control->trackLoaded(track);
+    publishDelayedLoopCue();
+    flushLoopCue();
+    EXPECT_FALSE(temporaryLoopCue(track));
+}
+
+TEST_F(LoopingControlTest, BorrowedLoopBeatsSurviveReplacementWithFakeBeats) {
+    const auto track = Track::newTemporary(QStringLiteral("/tmp/mixxx-loop-beats.mp3"));
+    auto* control = loopingControl();
+    control->setFrameInfo(mixxx::audio::kStartFramePos, mixxx::audio::FramePos{500000},
+            mixxx::audio::SampleRate{44100});
+    control->trackLoaded(track);
+    auto realBeats = mixxx::Beats::fromConstTempo(mixxx::audio::SampleRate{44100},
+            mixxx::audio::kStartFramePos, mixxx::Bpm(120.0));
+    std::weak_ptr<const mixxx::Beats> weakBeats = realBeats;
+    control->trackBeatsUpdated(realBeats);
+    realBeats.reset();
+    auto borrowed = acquireLoopBeats();
+    ASSERT_TRUE(borrowed);
+    ASSERT_TRUE(borrowed->trueTrackBeats);
+    EXPECT_TRUE(loopHasQuantizedTrackBeats());
+
+    control->trackBeatsUpdated(nullptr);
+    ASSERT_FALSE(weakBeats.expired());
+    EXPECT_EQ(mixxx::audio::FramePos{22050},
+            borrowed->beats->findNBeatsFromPosition(mixxx::audio::kStartFramePos, 1));
+    const auto fake = acquireLoopBeats();
+    ASSERT_TRUE(fake);
+    ASSERT_TRUE(fake->beats);
+    EXPECT_FALSE(fake->trueTrackBeats);
+    EXPECT_FALSE(loopHasQuantizedTrackBeats());
+    EXPECT_EQ(mixxx::audio::FramePos{44100},
+            fake->beats->findNBeatsFromPosition(mixxx::audio::kStartFramePos, 1));
+
+    borrowed = {};
+    EXPECT_FALSE(weakBeats.expired());
+    control->trackBeatsUpdated(nullptr);
+    EXPECT_TRUE(weakBeats.expired());
+}
+
+TEST_F(LoopingControlTest, ExhaustedLoopBeatReadersLeaveLoopGeometryUntouched) {
+    const auto track = Track::newTemporary(QStringLiteral("/tmp/mixxx-loop-beat-readers.mp3"));
+    auto* control = loopingControl();
+    control->setFrameInfo(mixxx::audio::kStartFramePos, mixxx::audio::FramePos{500000},
+            mixxx::audio::SampleRate{44100});
+    control->trackLoaded(track);
+    control->trackBeatsUpdated(mixxx::Beats::fromConstTempo(mixxx::audio::SampleRate{44100},
+            mixxx::audio::kStartFramePos, mixxx::Bpm(120.0)));
+    std::array<decltype(acquireLoopBeats()), 8> readers;
+    for (auto& reader : readers) {
+        reader = acquireLoopBeats();
+        ASSERT_TRUE(reader);
+    }
+    {
+        const mixxx::AudioCallbackScope audioCallbackScope;
+        control->setBeatLoop(mixxx::audio::FramePos{1000}, true);
+        EXPECT_FALSE(control->getLoopInfo().startPosition.isValid());
+        EXPECT_FALSE(control->getLoopInfo().endPosition.isValid());
+    }
+    readers[0] = {};
+    {
+        const mixxx::AudioCallbackScope audioCallbackScope;
+        control->setBeatLoop(mixxx::audio::FramePos{1000}, true);
+        EXPECT_EQ(mixxx::audio::FramePos{1000}, control->getLoopInfo().startPosition);
+        EXPECT_NEAR(89200.0, control->getLoopInfo().endPosition.value(),
+                kLoopPositionMaxAbsError);
+    }
+}
 
 TEST_F(LoopingControlTest, LoopSet) {
     m_pLoopStartPoint->set(mixxx::audio::kStartFramePos.toEngineSamplePos());
