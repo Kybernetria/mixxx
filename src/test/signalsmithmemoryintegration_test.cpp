@@ -259,17 +259,25 @@ class SignalsmithMemoryIntegrationTest : public SignalPathTest {
         }
         ASSERT_TRUE(resumed);
         EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
-        EXPECT_NEAR(0,
-                engine()->getExactPlayPos() -
-                        (restorePosition + elapsedCallbacks * playbackStep),
-                1.0);
+        const double sourceFramesPerOutputFrame =
+                std::fabs(playbackStep) / (kProcessBufferSize / 2.0);
+        const auto expectTimelinePosition = [&] {
+            const auto expected = restorePosition + elapsedCallbacks * playbackStep;
+            const double roundingTolerance = 64 * std::numeric_limits<double>::epsilon() *
+                    std::max(1.0, std::fabs(expected.value()));
+            const double lag = direction * (expected - engine()->getExactPlayPos());
+            // AI-generated: Recovery discards whole output frames, leaving less
+            // than one output frame of source-time debt. End AI-generated text.
+            EXPECT_GE(lag, -roundingTolerance);
+            EXPECT_LT(lag, sourceFramesPerOutputFrame + roundingTolerance);
+        };
+        expectTimelinePosition();
         for (int i = 0; i < 8; ++i) {
+            const auto before = engine()->getExactPlayPos();
             process();
             ++elapsedCallbacks;
-            EXPECT_NEAR(0,
-                    engine()->getExactPlayPos() -
-                            (restorePosition + elapsedCallbacks * playbackStep),
-                    1.0);
+            EXPECT_NEAR(playbackStep, engine()->getExactPlayPos() - before, 1e-6);
+            expectTimelinePosition();
             QTest::qSleep(1);
         }
     }

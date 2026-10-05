@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -160,6 +161,76 @@ TEST_F(EngineBufferScaleSignalsmithTest, ExactSeekCancelsLiveTimelineDebt) {
     EXPECT_EQ(256, scaleEventually(output.data(), output.size()));
     EXPECT_EQ(0, scaler.discardedFrames());
     EXPECT_FALSE(scaler.isRecoveringLiveTimeline());
+}
+
+TEST_F(EngineBufferScaleSignalsmithTest, FractionalTempoRecoveryLeavesLessThanOneOutputFrameOfDebt) {
+    for (const int channels : {2, 8}) {
+        for (const int frames : {64, 511}) {
+            for (const double rate : {0.73, 1.02, 1.37}) {
+                for (const bool reverse : {false, true}) {
+                    for (const int heldCallbacks : {1, 13}) {
+                        SCOPED_TRACE(channels);
+                        SCOPED_TRACE(frames);
+                        SCOPED_TRACE(rate);
+                        SCOPED_TRACE(reverse);
+                        SCOPED_TRACE(heldCallbacks);
+                        ready(channels);
+                        ASSERT_FALSE(HasFatalFailure());
+                        double tempo = reverse ? -rate : rate;
+                        double pitch = 1;
+                        scaler.setScaleParameters(1, &tempo, &pitch);
+                        scaler.setPreparationPausedForTest(true);
+                        scaler.setLiveTimeline(true);
+                        std::vector<float> output(frames * channels);
+                        for (int i = 0; i < heldCallbacks; ++i) {
+                            ASSERT_EQ(0, scaler.scaleBuffer(output.data(), output.size()));
+                        }
+                        scaler.setPreparationPausedForTest(false);
+                        for (int i = 0; i < 1000 && !scaler.preparationReadyForTest(); ++i) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                        }
+                        ASSERT_TRUE(scaler.preparationReadyForTest());
+                        double traversed = 0;
+                        double elapsed = heldCallbacks * frames * rate;
+                        double recoveredLag = 0;
+                        bool recovered = false;
+                        const auto roundingTolerance = [&] {
+                            return 64 * std::numeric_limits<double>::epsilon() *
+                                    std::max(1.0, elapsed);
+                        };
+                        for (int i = 0; i < heldCallbacks + 8; ++i) {
+                            const double delivered =
+                                    scaler.scaleBuffer(output.data(), output.size());
+                            elapsed += frames * rate;
+                            traversed += delivered + scaler.discardedFrames();
+                            if (delivered > 0) {
+                                const double lag = elapsed - traversed;
+                                EXPECT_GE(lag, -roundingTolerance());
+                                EXPECT_LT(lag, rate + roundingTolerance());
+                                if (!scaler.isRecoveringLiveTimeline()) {
+                                    recovered = true;
+                                    recoveredLag = lag;
+                                    break;
+                                }
+                            }
+                        }
+                        ASSERT_TRUE(recovered);
+                        for (int i = 0; i < 8; ++i) {
+                            const double delivered =
+                                    scaler.scaleBuffer(output.data(), output.size());
+                            EXPECT_NEAR(frames * rate, delivered, roundingTolerance());
+                            EXPECT_EQ(0, scaler.discardedFrames());
+                            elapsed += frames * rate;
+                            traversed += delivered;
+                            EXPECT_NEAR(recoveredLag,
+                                    elapsed - traversed,
+                                    roundingTolerance());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST_F(EngineBufferScaleSignalsmithTest, ResumeFadeKeepsIdenticalStemChannelsEqual) {
