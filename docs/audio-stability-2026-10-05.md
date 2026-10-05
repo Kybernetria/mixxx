@@ -124,19 +124,51 @@ methods with small substitutes for unavailable Qt dependencies:
 - Signalsmith fractional recovery passes 48 deterministic cases and 432 checks
   in optimized and UBSan builds, covering stereo/stems, forward/reverse playback,
   fractional tempos and different callback sizes.
+- Seek commands now use two bounded snapshot lanes: the single audio publisher
+  never waits for the serialized non-audio publishers. Consuming a captured
+  command no longer clears a newer command, and a late older publication cannot
+  replace a newer one. Clone commands carry their own borrowed source identity.
+  Actual-source notification and clone interleavings pass optimized, UBSan and
+  TSan probes, with zero callback allocations in the mailbox probe.
+- New native regressions exercise rapid real-worker WAV loading, ejecting,
+  repeated loads of the same Track pointer and generated eight-channel format
+  transitions while another Signalsmith deck plays. Native seek tests cover
+  publication during notification, slip/phase priority and playback at track end.
+- Linear scaler scratch buffers are allocated for the maximum input channel
+  count during construction. Loading stems no longer resizes three scratch
+  buffers in the audio callback even when Signalsmith is selected. The actual
+  scaler allocation probe records zero SampleUtil allocations and frees across
+  mono/stereo/eight-channel transitions and scratch reversals.
+- Eject completion always reaches engine controls and the player UI. A current
+  eject unloads the pending UI track even if the engine still held a different
+  old track, or had not accepted any track yet. Deterministic native tests cover
+  both interleavings.
+- Mixer destruction joins its worker scheduler before destroying registered
+  channel workers. The actual scheduler and worker sources pass 1,000 UBSan
+  teardown cycles, including notifications after stopping the scheduler.
 
-The new native regressions and dependency configuration still require the next
-full GitHub CI run. Probe results are not a substitute for those native checks.
+Run `37303453705` completed native compilation in all three configurations.
+Debug and Release exposed three saved-loop assertions expecting immediate
+public status updates after a callback. They now verify the internal state and
+then the owner-thread projection separately. The sanitizer run exposed an SDK
+integration problem: its SQLite driver used bundled SQLite while Mixxx called
+the system SQLite API on those handles. Sanitizer CI now builds the matching
+Qt 6.8.3 SQLite driver against system SQLite and tests real native handles,
+collations and functions before building Mixxx. It also pins FFmpeg headers and
+libraries to the same system installation; the SDK had contaminated discovery
+and the stem open tests rejected the resulting stream layout.
+
+The final native regressions and dependency configuration require a full
+GitHub CI rerun. Probe results are not a substitute for those native checks.
 
 Local Qt/CMake builds and hardware listening are unavailable in this execution
 environment. Leak scanning is unavailable for local ASan probes because `/proc`
 access is restricted; GitHub CI still enables it. Helper tests do not prove
 whole-application thread safety or device timing.
 
-General seek-queue publication during callback consumption still needs a
-command-ownership change: a seek queued during notification can be erased by
-the callback's final queue clear. Signalsmith worker
-latency, live-recovery budgeting and device underruns still require measured
-playback and loading tests on the user's setup.
+Signalsmith worker latency, live-recovery budgeting and device underruns still
+require measured playback and loading tests on the user's setup. The loading
+integration test establishes state and audio progression, not a hardware
+deadline or an uninterrupted device stream.
 
 <!-- End of AI-generated implementation and validation record. -->
