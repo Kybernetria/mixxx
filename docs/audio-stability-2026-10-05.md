@@ -32,6 +32,24 @@ they do not establish the cause of every reported hardware dropout.
 - Beat undo releases the Track mutex before emitting beat notifications. Its
   undo-stack query is protected by that mutex. This avoids a lock-order cycle
   with concurrent track notifications and a racing undo-stack read.
+- Reader requests, lifecycle messages, chunk results, engine notifications and
+  queued GUI notifications now carry a request generation. An old open cannot
+  resurrect an ejected track, replace a newer load or reset newer stem controls.
+  Returning an old chunk cannot remove a newer mapping with the same index.
+- Both cache containers reserve their full 80-entry capacity before playback.
+  A sorted pointer vector replaces the allocating hash nodes; the free pool
+  uses a reserved vector. Callback status draining processes only the initial
+  bounded queue contents. A full worker status queue sleeps briefly and checks
+  shutdown instead of spinning indefinitely.
+- Saved-jump status and arm generation share one atomic token. Geometry edits
+  invalidate captured decisions before publishing positions. Callback
+  consumption cannot disarm a newer arm and does not emit Qt signals or write
+  public status controls. One owner-thread timer projects status every 20 ms;
+  public lights may take longer to update when the GUI is blocked.
+- A control-ring reader previously decremented a writer-owned zero counter,
+  wrapping it to the maximum unsigned value. Another reader or writer could
+  then enter during a payload write. Bounded compare/exchange reader acquisition
+  now leaves zero unchanged, preserving exclusive writer ownership.
 
 ## Sanitizer defects
 
@@ -59,6 +77,26 @@ The sanitizer workflow retains leak detection and the entire test suite. It
 uses two test processes, line-level debug information, and a three-hour job
 limit so build time does not prevent completing the tests.
 
+Run `37270539583` completed all 1,472 registered tests. Full Debug and Release
+passed. Sanitizers exposed seven failing tests: two additional renderer fixture
+leaks, an expired command-line argument reference in the QML library fixture,
+two fractional slip assertions and two QML startup leak reports. The fixtures
+now retain the borrowed objects for their required lifetimes. Recovery discards
+whole output frames, so its source-time residual is bounded by one output frame
+at the current tempo; the integration assertions now use that derived bound and
+separately check subsequent callback movement.
+
+The startup reports also contain defects in the old system dependencies:
+PortMidi's removed preference lookup leaks two path buffers, and Qt 6.4.2's
+software render context does not release its texture containers on invalidation.
+The upstream Qt fix is
+[`f1b188df132c42da62197055725e5f7eebcc4249`](https://github.com/qt/qtdeclarative/commit/f1b188df132c42da62197055725e5f7eebcc4249).
+Sanitizer CI pins Qt 6.8.3 and an instrumented PortMidi 2.0.7 with the existing
+Flatpak archive checksum. It verifies selected libraries and runs repeated
+PortMidi initialization/termination with leak detection. Debug and Release
+continue testing the system dependency configuration. No leak suppression or
+test exclusion is added.
+
 ## Validation and limits
 
 Focused probes compile actual modified repository helpers and extracted
@@ -75,23 +113,30 @@ methods with small substitutes for unavailable Qt dependencies:
   the fixed code passes.
 - Native regressions cover the transport, format, beat, persistence, shutdown,
   timer, buffer and decoder changes. Full native validation runs in GitHub CI.
+- Extracted reader cache methods pass UBSan with one million turnovers, two
+  million lookups and zero C++ allocations/deallocations. The actual status
+  publisher exits with a full 128-entry FIFO and no consumer.
+- The saved-jump source probe rejects 10,000 stale rearm/geometry decisions with
+  zero callback allocations, deallocations, public status writes or Qt signals.
+- The actual control-ring regression fails with the previous header and passes
+  with the fixed header. Concurrent snapshots pass UBSan and TSan. These tests
+  establish payload exclusion, not an ordering guarantee for concurrent writers.
+- Signalsmith fractional recovery passes 48 deterministic cases and 432 checks
+  in optimized and UBSan builds, covering stereo/stems, forward/reverse playback,
+  fractional tempos and different callback sizes.
+
+The new native regressions and dependency configuration still require the next
+full GitHub CI run. Probe results are not a substitute for those native checks.
 
 Local Qt/CMake builds and hardware listening are unavailable in this execution
 environment. Leak scanning is unavailable for local ASan probes because `/proc`
 access is restricted; GitHub CI still enables it. Helper tests do not prove
 whole-application thread safety or device timing.
 
-The saved-jump public-control projection race remains a separate ownership
-change: an old callback can overwrite a newly armed visible status even when
-the internal epoch check is correct. A pre-store epoch check alone does not
-close that interleaving. General seek-queue publication during callback
-consumption also needs a broader command-ownership review. Signalsmith worker
+General seek-queue publication during callback consumption still needs a
+command-ownership change: a seek queued during notification can be erased by
+the callback's final queue clear. Signalsmith worker
 latency, live-recovery budgeting and device underruns still require measured
 playback and loading tests on the user's setup.
-
-The reader's existing consecutive-load TODO also needs a generation protocol:
-an already-running worker load can publish a request superseded by eject or
-another load. A fix must keep cache-status messages, worker source state and
-engine track notifications on the same generation.
 
 <!-- End of AI-generated implementation and validation record. -->

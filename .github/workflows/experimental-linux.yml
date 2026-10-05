@@ -159,6 +159,20 @@ jobs:
         run: |
           tools/debian_buildenv.sh setup
           sudo apt-get install -y --no-install-recommends qml6-module-qtcore qml6-module-qtqml
+      - name: Install Qt 6.8.3 for sanitizer tests
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125
+        with:
+          version: '6.8.3'
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          dir: ${{ runner.temp }}/sanitizer-qt
+          modules: 'qt5compat qtshadertools qtmultimedia'
+          aqtversion: '==3.3.0'
+          py7zrversion: '==1.1.0'
+          cache: true
+      - name: Build and check pinned PortMidi for sanitizer tests
+        run: bash tools/build_sanitizer_portmidi.sh "${{ runner.temp }}/sanitizer-portmidi"
       - name: Configure AddressSanitizer and UndefinedBehaviorSanitizer
         env:
           CC: gcc
@@ -166,18 +180,80 @@ jobs:
         run: >-
           cmake -S . -B build-experimental-sanitizers
           -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_PREFIX_PATH:PATH="$QT_ROOT_DIR"
+          -DQT_DIR:PATH="$QT_ROOT_DIR/lib/cmake/Qt6"
+          -DQt6_DIR:PATH="$QT_ROOT_DIR/lib/cmake/Qt6"
           -DQT6=ON -DQML=ON -DBULK=ON -DFFMPEG=ON
           -DLOCALECOMPARE=ON -DMAD=ON -DMODPLUG=ON -DWAVPACK=ON
           -DINSTALL_USER_UDEV_RULES=OFF
           -DBUILD_TESTING=ON -DBUILD_BENCH=OFF
+          -DPortMidi_INCLUDE_DIR:PATH="${{ runner.temp }}/sanitizer-portmidi/include"
+          -DPortTime_INCLUDE_DIR:PATH="${{ runner.temp }}/sanitizer-portmidi/include"
+          -DPortMidi_LIBRARY:FILEPATH="${{ runner.temp }}/sanitizer-portmidi/lib/libportmidi.so"
+          -DPortTime_LIBRARY:FILEPATH="${{ runner.temp }}/sanitizer-portmidi/lib/libportmidi.so"
           -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
           -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
           -DCMAKE_CXX_FLAGS_DEBUG="-g1"
           -DCMAKE_C_FLAGS_DEBUG="-g1"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
           -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Verify sanitizer dependency selection
+        env:
+          PORTMIDI_PREFIX: ${{ runner.temp }}/sanitizer-portmidi
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          cache = dict(line.split('=', 1) for line in Path(
+              'build-experimental-sanitizers/CMakeCache.txt').read_text().splitlines()
+              if line and not line.startswith(('#', '//')) and '=' in line)
+          prefix = Path(os.environ['PORTMIDI_PREFIX'])
+          for key, relative_path in (
+                  ('PortMidi_INCLUDE_DIR:PATH', 'include'),
+                  ('PortTime_INCLUDE_DIR:PATH', 'include'),
+                  ('PortMidi_LIBRARY:FILEPATH', 'lib/libportmidi.so'),
+                  ('PortTime_LIBRARY:FILEPATH', 'lib/libportmidi.so')):
+              assert Path(cache[key]) == prefix / relative_path, (key, cache[key])
+          qt_prefix = Path(os.environ['QT_ROOT_DIR'])
+          qt_version = subprocess.check_output(
+              [str(qt_prefix / 'bin/qmake'), '-query', 'QT_VERSION'], text=True).strip()
+          assert qt_version == '6.8.3', qt_version
+          for key, value in cache.items():
+              if key == 'QT_DIR:PATH' or (key.startswith('Qt6') and key.endswith('_DIR:PATH')):
+                  if key == 'Qt6Keychain_DIR:PATH' or value.endswith('-NOTFOUND'):
+                      continue
+                  assert Path(value).is_relative_to(qt_prefix), (key, value)
+          PY
       - name: Build sanitizer tests
         run: cmake --build build-experimental-sanitizers --parallel 2
+      - name: Verify sanitizer dependency runtime libraries
+        env:
+          PORTMIDI_PREFIX: ${{ runner.temp }}/sanitizer-portmidi
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          qt_prefix = Path(os.environ['QT_ROOT_DIR'])
+          dependencies = subprocess.check_output(
+              ['ldd', 'build-experimental-sanitizers/mixxx-test'], text=True)
+          qt_libraries = [line.split() for line in dependencies.splitlines()
+                          if line.lstrip().startswith('libQt6')]
+          assert qt_libraries, dependencies
+          for fields in qt_libraries:
+              assert len(fields) >= 3 and fields[1] == '=>', fields
+              assert Path(fields[2]).is_relative_to(qt_prefix), fields
+          print(f'Checked {len(qt_libraries)} Qt runtime libraries under {qt_prefix}')
+          portmidi_prefix = Path(os.environ['PORTMIDI_PREFIX'])
+          midi_libraries = [line.split() for line in dependencies.splitlines()
+                            if line.lstrip().startswith(('libportmidi', 'libporttime'))]
+          assert midi_libraries, dependencies
+          for fields in midi_libraries:
+              assert len(fields) >= 3 and fields[1] == '=>', fields
+              assert fields[0].startswith('libportmidi'), fields
+              assert Path(fields[2]).is_relative_to(portmidi_prefix), fields
+          PY
       - name: Run full sanitizer test suite
         env:
           ASAN_OPTIONS: detect_leaks=1:fast_unwind_on_malloc=0
