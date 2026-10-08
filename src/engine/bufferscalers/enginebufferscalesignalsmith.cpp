@@ -21,6 +21,7 @@
 
 namespace {
 constexpr int kOutputFrames = 256;
+constexpr int kResumeFadeFrames = 256;
 constexpr int kInputFrames = mixxx::engine::stretch::kMaxInputFrames;
 constexpr int kReadBudget = mixxx::engine::stretch::kReadAttemptBudget;
 constexpr int kZeroReadBudget = mixxx::engine::stretch::kZeroReadAttemptBudget;
@@ -132,7 +133,7 @@ struct EngineBufferScaleSignalsmith::State {
                     completed->seekGeneration == generation.load(std::memory_order_acquire)) {
                 active = completed;
                 needsPreroll = false;
-                resuming = true;
+                resumeFadeRemaining = kResumeFadeFrames;
                 availableOutput = 0;
                 fraction = 0;
             } else if (completed->key == key) {
@@ -181,7 +182,7 @@ struct EngineBufferScaleSignalsmith::State {
     int outputOffset = 0;
     double fraction = 0;
     double outputRate = 0;
-    bool resuming = false;
+    int resumeFadeRemaining = 0;
     bool liveTimeline = false;
     double missedFrames = 0;
     double discardedFrames = 0;
@@ -278,7 +279,7 @@ void EngineBufferScaleSignalsmith::clear() {
     state.pending.reset();
     state.availableOutput = 0;
     state.fraction = 0;
-    state.resuming = false;
+    state.resumeFadeRemaining = 0;
     setLiveTimeline(false);
 }
 
@@ -398,15 +399,17 @@ double EngineBufferScaleSignalsmith::scaleBufferInternal(
                             config.outputPointers[ch][state.outputOffset + frame];
                 }
             }
-            if (state.resuming) {
-                const CSAMPLE_GAIN gainDelta = CSAMPLE_GAIN_ONE / CSAMPLE_GAIN(count);
-                for (int frame = 0; frame < count; ++frame) {
-                    const CSAMPLE_GAIN gain = gainDelta + gainDelta * frame;
+            if (state.resumeFadeRemaining > 0) {
+                const int fadeFrames = std::min(count, state.resumeFadeRemaining);
+                const int fadeOffset = kResumeFadeFrames - state.resumeFadeRemaining;
+                for (int frame = 0; frame < fadeFrames; ++frame) {
+                    const CSAMPLE gain = static_cast<CSAMPLE>(fadeOffset + frame + 1) /
+                            kResumeFadeFrames;
                     for (int ch = 0; ch < channels; ++ch) {
                         output[(written + frame) * channels + ch] *= gain;
                     }
                 }
-                state.resuming = false;
+                state.resumeFadeRemaining -= fadeFrames;
             }
             state.outputOffset += count;
             state.availableOutput -= count;
@@ -442,7 +445,7 @@ double EngineBufferScaleSignalsmith::scaleBufferInternal(
                     (batch.inputRequired - batch.collected) * channels,
                     getOutputSignal().getChannelCount());
             if (result.unavailable) {
-                state.resuming = true;
+                state.resumeFadeRemaining = kResumeFadeFrames;
                 finish();
                 return consumedFrames;
             }

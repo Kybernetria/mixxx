@@ -29,7 +29,9 @@ class StretchReader final : public ReadAheadManager {
         for (int frame = 0; frame < frames; ++frame) {
             for (int ch = 0; ch < channels; ++ch) {
                 const double sourceFrame = position + frame * (rate < 0 ? -1 : 1);
-                output[frame * channels + ch] = impulse
+                output[frame * channels + ch] = constant
+                        ? 1.0f
+                        : impulse
                         ? (sourceFrame == impulseFrame ? 1.0f : 0.0f)
                         : static_cast<float>(std::sin(sourceFrame *
                                   (identicalChannels ? 1 : ch + 1) *
@@ -45,6 +47,7 @@ class StretchReader final : public ReadAheadManager {
     int maxFrames = 8192;
     bool miss = false;
     bool impulse = false;
+    bool constant = false;
     bool identicalChannels = false;
     int impulseFrame = 10000;
     int sourceSampleRate = 44100;
@@ -251,6 +254,55 @@ TEST_F(EngineBufferScaleSignalsmithTest, ResumeFadeKeepsIdenticalStemChannelsEqu
                 }
             }
             EXPECT_GT(energy, 0.001);
+        }
+    }
+}
+
+TEST_F(EngineBufferScaleSignalsmithTest, ResumeFadeDurationIsIndependentOfCallbackPartitioning) {
+    reader.constant = true;
+    for (const int channels : {2, 8}) {
+        SCOPED_TRACE(channels);
+        ready(channels);
+
+        const auto capture = [&](int callbackFrames) {
+            scaler.clear();
+            reader.position = 20000;
+            std::vector<float> result(256 * channels);
+            std::vector<float> callback(callbackFrames * channels);
+            int writtenFrames = 0;
+            while (writtenFrames < 256) {
+                const int frames = std::min(callbackFrames, 256 - writtenFrames);
+                EXPECT_NEAR(frames,
+                        scaleEventually(callback.data(), frames * channels),
+                        1e-8);
+                std::copy_n(callback.begin(), frames * channels,
+                        result.begin() + writtenFrames * channels);
+                writtenFrames += frames;
+            }
+            return result;
+        };
+
+        const auto wholeCallback = capture(256);
+        const auto singleFrameCallbacks = capture(1);
+        double referenceLevel = 0;
+        for (int frame = 240; frame < 256; ++frame) {
+            referenceLevel += std::abs(wholeCallback[frame * channels]);
+        }
+        referenceLevel /= 16;
+        ASSERT_GT(referenceLevel, 0.1);
+        for (int frame = 0; frame < 256; ++frame) {
+            const double expectedGain = (frame + 1) / 256.0;
+            for (int ch = 0; ch < channels; ++ch) {
+                const double wholeGain = wholeCallback[frame * channels + ch] / referenceLevel;
+                const double partitionedGain =
+                        singleFrameCallbacks[frame * channels + ch] / referenceLevel;
+                EXPECT_NEAR(expectedGain, wholeGain, 0.08)
+                        << "whole callback frame " << frame << " channel " << ch;
+                EXPECT_NEAR(expectedGain, partitionedGain, 0.08)
+                        << "single-frame callback frame " << frame << " channel " << ch;
+                EXPECT_NEAR(wholeGain, partitionedGain, 0.04)
+                        << "frame " << frame << " channel " << ch;
+            }
         }
     }
 }
