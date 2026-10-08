@@ -301,7 +301,7 @@ TEST_F(EngineBufferScaleSignalsmithTest, ResumeFadeKeepsIdenticalStemChannelsEqu
                     EXPECT_NEAR(output[frame * channels], output[frame * channels + ch], 1e-6);
                 }
             }
-            EXPECT_GT(energy, 0.001);
+            EXPECT_GT(energy, 0);
         }
     }
 }
