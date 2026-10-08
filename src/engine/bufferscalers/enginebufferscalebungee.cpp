@@ -22,7 +22,8 @@ struct Configuration {
     Configuration(Key k, ReadAheadManager* reader)
             : key(k),
               scaler(reader) {
-        scaler.setSignal(mixxx::audio::SampleRate(k >> 8), mixxx::audio::ChannelCount(k & 255));
+        scaler.setSignal(mixxx::audio::SampleRate(static_cast<int>(k >> 8)),
+                mixxx::audio::ChannelCount(static_cast<int>(k & 255)));
     }
 };
 static_assert(std::atomic<Key>::is_always_lock_free);
