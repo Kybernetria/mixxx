@@ -10,6 +10,9 @@
 #include "control/controlpushbutton.h"
 #include "engine/bufferscalers/enginebufferscalelinear.h"
 #include "engine/bufferscalers/enginebufferscalesignalsmith.h"
+#ifdef __BUNGEE__
+#include "engine/bufferscalers/enginebufferscalebungee.h"
+#endif
 #include "engine/cachingreader/cachingreader.h"
 #include "engine/channels/enginechannel.h"
 #include "engine/controls/bpmcontrol.h"
@@ -281,6 +284,9 @@ EngineBuffer::EngineBuffer(const QString& group,
     // Construct scaling objects
     m_pScaleLinear = new EngineBufferScaleLinear(m_pReadAheadManager);
     m_pScaleSignalsmith = new EngineBufferScaleSignalsmith(m_pReadAheadManager);
+#ifdef __BUNGEE__
+    m_pScaleBungee = new EngineBufferScaleBungee(m_pReadAheadManager);
+#endif
     slotKeylockEngineChanged(m_pKeylockEngine->get());
     m_pScaleVinyl = m_pScaleLinear;
     m_pScale = m_pScaleVinyl;
@@ -334,6 +340,9 @@ EngineBuffer::~EngineBuffer() {
 
     delete m_pScaleLinear;
     delete m_pScaleSignalsmith;
+#ifdef __BUNGEE__
+    delete m_pScaleBungee;
+#endif
 
     delete m_pKeylock;
     delete m_pReplayGain;
@@ -920,6 +929,10 @@ void EngineBuffer::slotControlStop(double v)
 }
 
 #ifdef BUILD_TESTING
+void EngineBuffer::selectSignalsmithKeylockForTest() {
+    m_pScaleKeylock = m_pScaleSignalsmith;
+}
+
 void EngineBuffer::setKeylockPreparationPausedForTest(bool paused) {
     m_pScaleSignalsmith->setPreparationPausedForTest(paused);
 }
@@ -935,7 +948,7 @@ std::uint64_t EngineBuffer::keylockPreparationSubmissionsForTest() const {
 
 EngineBuffer::KeylockEngine EngineBuffer::resolveKeylockEngine(double savedId) {
     if (!util_isfinite(savedId)) {
-        return KeylockEngine::Signalsmith;
+        return defaultKeylockEngine();
     }
     // Avoid floating-to-enum conversion until the saved numeric ID is validated.
     for (const auto engine : kKeylockEngines) {
@@ -943,22 +956,27 @@ EngineBuffer::KeylockEngine EngineBuffer::resolveKeylockEngine(double savedId) {
             return engine;
         }
     }
-    // Legacy engines, reserved IDs, and invalid values deterministically use
-    // the only supported deck keylock engine.
-    return KeylockEngine::Signalsmith;
+    return defaultKeylockEngine();
 }
 
 void EngineBuffer::slotKeylockEngineChanged(double dIndex) {
     if (m_bScalerOverride) {
         return;
     }
-    // Keep the legacy control/config key, but normalize every saved or live
-    // value to the sole supported deck keylock engine.
     const auto engine = resolveKeylockEngine(dIndex);
     if (dIndex != static_cast<double>(engine)) {
         m_pKeylockEngine->set(static_cast<double>(engine));
     }
-    m_pScaleKeylock = m_pScaleSignalsmith;
+    switch (engine) {
+#ifdef __BUNGEE__
+    case KeylockEngine::Bungee:
+        m_pScaleKeylock = m_pScaleBungee;
+        break;
+#endif
+    default:
+        m_pScaleKeylock = m_pScaleSignalsmith;
+        break;
+    }
 }
 
 void EngineBuffer::slipQuitAndAdopt() {
@@ -1346,6 +1364,9 @@ void EngineBuffer::process(CSAMPLE* pOutput,
             m_callbackKeylockScale = m_pScaleKeylock.load(std::memory_order_acquire);
             m_pScaleLinear->setSignal(m_sampleRate, m_channelCount);
             m_pScaleSignalsmith->setSignal(m_sampleRate, m_channelCount);
+#ifdef __BUNGEE__
+            m_pScaleBungee->setSignal(m_sampleRate, m_channelCount);
+#endif
             processTrackLocked(pOutput, bufferSize, m_sampleRate);
             processed = true;
         }

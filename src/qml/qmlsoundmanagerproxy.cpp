@@ -142,17 +142,20 @@ QmlSoundDeviceProxyList QmlSoundManagerProxy::availableOutputDevices(const QStri
 }
 
 QList<EngineBuffer::KeylockEngine> QmlSoundManagerProxy::getKeylockEngines() const {
-    return {EngineBuffer::KeylockEngine::Signalsmith};
+    return QList<EngineBuffer::KeylockEngine>(
+            EngineBuffer::kKeylockEngines.begin(), EngineBuffer::kKeylockEngines.end());
 }
 
-void QmlSoundManagerProxy::setKeylockEngine(EngineBuffer::KeylockEngine) {
-    constexpr auto engine = EngineBuffer::KeylockEngine::Signalsmith;
+void QmlSoundManagerProxy::setKeylockEngine(EngineBuffer::KeylockEngine engine) {
+    if (!EngineBuffer::isKeylockEngineAvailable(engine)) {
+        engine = EngineBuffer::defaultKeylockEngine();
+    }
     m_keylockEngine.set(static_cast<double>(engine));
     m_pSoundManager->userSettings()->setValue(kKeylockEngineCfgkey, engine);
 }
 
 EngineBuffer::KeylockEngine QmlSoundManagerProxy::getKeylockEngine() const {
-    return EngineBuffer::KeylockEngine::Signalsmith;
+    return EngineBuffer::resolveKeylockEngine(m_keylockEngine.get());
 }
 
 QString QmlSoundManagerProxy::getAPI() const {

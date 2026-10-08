@@ -4,6 +4,7 @@
 
 #include <QAtomicInt>
 #include <QMutex>
+#include <algorithm>
 #include <atomic>
 #include <initializer_list>
 
@@ -46,6 +47,9 @@ class ControlPotmeter;
 class EngineBufferScale;
 class EngineBufferScaleLinear;
 class EngineBufferScaleSignalsmith;
+#ifdef __BUNGEE__
+class EngineBufferScaleBungee;
+#endif
 class EngineSync;
 class EngineWorkerScheduler;
 class VisualPlayPosition;
@@ -91,15 +95,18 @@ class EngineBuffer : public EngineObject {
         RubberBandFaster = 1,
         RubberBandFiner = 2,
         RubberBandR3ShortWindow = 3,
-        // 4 is reserved for the historical fork's Bungee backend.
-        Reserved = 4,
+        Bungee = 4,
         Signalsmith = 5,
     };
     Q_ENUM(KeylockEngine);
 
     // intended for iteration over the KeylockEngine enum
     constexpr static std::initializer_list<KeylockEngine> kKeylockEngines = {
+#ifdef __BUNGEE__
+            KeylockEngine::Bungee,
+#else
             KeylockEngine::Signalsmith,
+#endif
     };
 
     EngineBuffer(const QString& group,
@@ -190,19 +197,30 @@ class EngineBuffer : public EngineObject {
     void loadFakeTrack(TrackPointer pTrack, bool bPlay);
 
     static QString getKeylockEngineName(KeylockEngine engine) {
-        return engine == KeylockEngine::Signalsmith
-                ? tr("Signalsmith Stretch")
-                : tr("Unknown, using Signalsmith Stretch");
+        switch (engine) {
+        case KeylockEngine::Bungee:
+            return tr("Bungee");
+        case KeylockEngine::Signalsmith:
+            return tr("Signalsmith Stretch");
+        default:
+            return tr("Unknown, using %1")
+                    .arg(getKeylockEngineName(defaultKeylockEngine()));
+        }
     }
 
     static bool isKeylockEngineAvailable(KeylockEngine engine) {
-        return engine == KeylockEngine::Signalsmith;
+        return std::find(kKeylockEngines.begin(), kKeylockEngines.end(), engine) !=
+                kKeylockEngines.end();
     }
 
     static KeylockEngine resolveKeylockEngine(double savedId);
 
     constexpr static KeylockEngine defaultKeylockEngine() {
+#ifdef __BUNGEE__
+        return KeylockEngine::Bungee;
+#else
         return KeylockEngine::Signalsmith;
+#endif
     }
 
     // Request that the EngineBuffer load a track. Since the process is
@@ -234,6 +252,7 @@ class EngineBuffer : public EngineObject {
     void verifyPlay();
 
 #ifdef BUILD_TESTING
+    void selectSignalsmithKeylockForTest();
     void setKeylockPreparationPausedForTest(bool paused);
     bool keylockPreparationReadyForTest() const;
     std::uint64_t keylockPreparationSubmissionsForTest() const;
@@ -479,6 +498,9 @@ class EngineBuffer : public EngineObject {
     EngineBufferScaleLinear* m_pScaleLinear;
     // Object used for pitch-independent time stretch (key lock) scaling.
     EngineBufferScaleSignalsmith* m_pScaleSignalsmith;
+#ifdef __BUNGEE__
+    EngineBufferScaleBungee* m_pScaleBungee;
+#endif
 
     // Indicates whether the scaler has changed since the last process()
     bool m_bScalerChanged;

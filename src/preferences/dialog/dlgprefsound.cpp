@@ -513,9 +513,10 @@ void DlgPrefSound::slotApply() {
         // Keep the legacy setting normalized while preserving the existing
         // audio-device close/apply sequence.
         m_pSoundManager->closeActiveConfig();
-        m_pKeylockEngine.set(static_cast<double>(EngineBuffer::KeylockEngine::Signalsmith));
+        const auto keylockEngine = EngineBuffer::defaultKeylockEngine();
+        m_pKeylockEngine.set(static_cast<double>(keylockEngine));
         m_pSettings->set(kKeylockEngingeCfgkey,
-                ConfigValue(static_cast<int>(EngineBuffer::KeylockEngine::Signalsmith)));
+                ConfigValue(static_cast<int>(keylockEngine)));
 
 #ifdef __PIPEWIRE__
         if (CmdlineArgs::Instance().getDeveloper()) {

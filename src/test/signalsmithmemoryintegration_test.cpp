@@ -23,18 +23,22 @@ TEST(KeylockEngineCompatibilityTest, HistoricalIdsAndUnavailableSelections) {
     EXPECT_EQ(1, static_cast<int>(EngineBuffer::KeylockEngine::RubberBandFaster));
     EXPECT_EQ(2, static_cast<int>(EngineBuffer::KeylockEngine::RubberBandFiner));
     EXPECT_EQ(3, static_cast<int>(EngineBuffer::KeylockEngine::RubberBandR3ShortWindow));
-    EXPECT_EQ(4, static_cast<int>(EngineBuffer::KeylockEngine::Reserved));
+    EXPECT_EQ(4, static_cast<int>(EngineBuffer::KeylockEngine::Bungee));
     EXPECT_EQ(5, static_cast<int>(EngineBuffer::KeylockEngine::Signalsmith));
-    EXPECT_EQ(EngineBuffer::KeylockEngine::Signalsmith,
-            EngineBuffer::defaultKeylockEngine());
+#ifdef __BUNGEE__
+    EXPECT_EQ(EngineBuffer::KeylockEngine::Bungee, EngineBuffer::defaultKeylockEngine());
+    EXPECT_TRUE(EngineBuffer::isKeylockEngineAvailable(EngineBuffer::KeylockEngine::Bungee));
+    EXPECT_FALSE(EngineBuffer::isKeylockEngineAvailable(EngineBuffer::KeylockEngine::Signalsmith));
+#else
+    EXPECT_EQ(EngineBuffer::KeylockEngine::Signalsmith, EngineBuffer::defaultKeylockEngine());
     EXPECT_TRUE(EngineBuffer::isKeylockEngineAvailable(EngineBuffer::KeylockEngine::Signalsmith));
+    EXPECT_FALSE(EngineBuffer::isKeylockEngineAvailable(EngineBuffer::KeylockEngine::Bungee));
+#endif
     EXPECT_FALSE(EngineBuffer::isKeylockEngineAvailable(EngineBuffer::KeylockEngine::SoundTouch));
     EXPECT_FALSE(EngineBuffer::isKeylockEngineAvailable(
             EngineBuffer::KeylockEngine::RubberBandFaster));
     for (const auto engine : EngineBuffer::kKeylockEngines) {
-        EXPECT_EQ(EngineBuffer::isKeylockEngineAvailable(engine)
-                        ? engine
-                        : EngineBuffer::KeylockEngine::Signalsmith,
+        EXPECT_EQ(EngineBuffer::defaultKeylockEngine(),
                 EngineBuffer::resolveKeylockEngine(
                         static_cast<double>(engine)));
     }
@@ -43,12 +47,13 @@ TEST(KeylockEngineCompatibilityTest, HistoricalIdsAndUnavailableSelections) {
                  2.0,
                  3.0,
                  4.0,
+                 5.0,
                  -1.0,
                  99.0,
                  0.5,
                  std::numeric_limits<double>::infinity(),
                  std::numeric_limits<double>::quiet_NaN()}) {
-        EXPECT_EQ(EngineBuffer::KeylockEngine::Signalsmith,
+        EXPECT_EQ(EngineBuffer::defaultKeylockEngine(),
                 EngineBuffer::resolveKeylockEngine(id));
     }
 }
@@ -59,6 +64,11 @@ class SignalsmithMemoryIntegrationTest : public SignalPathTest {
         SignalPathTest::SetUp();
         ControlObject::set(ConfigKey("[App]", "keylock_engine"),
                 static_cast<double>(EngineBuffer::KeylockEngine::Signalsmith));
+        for (auto* deck : {m_pChannel1->getEngineBuffer(),
+                     m_pChannel2->getEngineBuffer(),
+                     m_pChannel3->getEngineBuffer()}) {
+            deck->selectSignalsmithKeylockForTest();
+        }
         for (const auto& group : {m_sGroup1, m_sGroup2, m_sGroup3}) {
             ControlObject::set(ConfigKey(group, "quantize"), 0);
             ControlObject::set(ConfigKey(group, "keylock"), 1);

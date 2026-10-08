@@ -38,6 +38,7 @@ jobs:
           -DQT6=ON -DQML=ON -DBULK=ON -DFFMPEG=ON
           -DLOCALECOMPARE=ON -DMAD=ON -DMODPLUG=ON -DWAVPACK=ON
           -DINSTALL_USER_UDEV_RULES=OFF
+          -DBUNGEE=ON
           -DBUILD_TESTING=ON -DBUILD_BENCH=OFF
       - name: Build Debug
         run: cmake --build build-experimental-debug --parallel 2
@@ -84,6 +85,7 @@ jobs:
           -DQT6=ON -DQML=ON -DBULK=ON -DFFMPEG=ON
           -DLOCALECOMPARE=ON -DMAD=ON -DMODPLUG=ON -DWAVPACK=ON
           -DINSTALL_USER_UDEV_RULES=OFF
+          -DBUNGEE=ON
           -DBUILD_TESTING=ON -DBUILD_BENCH=OFF
       - name: Build Release
         run: cmake --build build-experimental-release --parallel 2
@@ -200,6 +202,7 @@ jobs:
             -DQT6=ON -DQML=ON -DBULK=ON -DFFMPEG=ON \
             -DLOCALECOMPARE=ON -DMAD=ON -DMODPLUG=ON -DWAVPACK=ON \
             -DINSTALL_USER_UDEV_RULES=OFF \
+            -DBUNGEE=ON \
             -DBUILD_TESTING=ON -DBUILD_BENCH=OFF \
             -DPortMidi_INCLUDE_DIR:PATH="${{ runner.temp }}/sanitizer-portmidi/include" \
             -DPortTime_INCLUDE_DIR:PATH="${{ runner.temp }}/sanitizer-portmidi/include" \
