@@ -205,14 +205,18 @@ SINT EngineBufferScaleBungeeCore::consumeReadAheadGap(
                 kMaxGrainFrames);
         const SINT samplesRequested = getOutputSignal().frames2samples(framesRequested);
         ++m_readAttempts;
-        const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+        auto read = m_pReadAheadManager->getNextSamplesForStretch(
                 signedEffectiveRate,
                 m_interleavedReadBuffer.data(),
                 samplesRequested,
                 getOutputSignal().getChannelCount());
         if (read.unavailable) {
-            m_cacheReadUnavailable = true;
-            break;
+            read.samplesRead = m_pReadAheadManager->getNextSamples(
+                    signedEffectiveRate,
+                    m_interleavedReadBuffer.data(),
+                    samplesRequested,
+                    getOutputSignal().getChannelCount());
+            read.unavailable = false;
         }
         const SINT availableFrames = getOutputSignal().samples2frames(read.samplesRead);
         if (availableFrames <= 0) {
@@ -291,14 +295,18 @@ SINT EngineBufferScaleBungeeCore::appendInputFrames(
         return 0;
     }
     ++m_readAttempts;
-    const auto read = m_pReadAheadManager->getNextSamplesForStretch(
+    auto read = m_pReadAheadManager->getNextSamplesForStretch(
             signedEffectiveRate,
             m_interleavedReadBuffer.data(),
             samplesRequested,
             getOutputSignal().getChannelCount());
     if (read.unavailable) {
-        m_cacheReadUnavailable = true;
-        return 0;
+        read.samplesRead = m_pReadAheadManager->getNextSamples(
+                signedEffectiveRate,
+                m_interleavedReadBuffer.data(),
+                samplesRequested,
+                getOutputSignal().getChannelCount());
+        read.unavailable = false;
     }
     const SINT availableFrames = getOutputSignal().samples2frames(read.samplesRead);
     if (availableFrames <= 0) {

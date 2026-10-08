@@ -19,6 +19,20 @@
 namespace {
 class BungeeReader final : public ReadAheadManager {
   public:
+    SINT getNextSamples(double rate,
+            CSAMPLE* output,
+            SINT samples,
+            mixxx::audio::ChannelCount channels) override {
+        const bool wasMissing = miss;
+        miss = false;
+        const auto read = getNextSamplesForStretch(rate, output, samples, channels);
+        miss = wasMissing;
+        if (wasMissing) {
+            std::fill_n(output, samples, 0.0f);
+        }
+        return read.samplesRead;
+    }
+
     StretchReadResult getNextSamplesForStretch(double rate,
             CSAMPLE* output,
             SINT samples,
@@ -167,7 +181,7 @@ TEST_F(EngineBufferScaleBungeeTest, ImpulseLandmarksRemainOnTimeline) {
     }
 }
 
-TEST_F(EngineBufferScaleBungeeTest, MissAndZeroReadBudgetAreTransactional) {
+TEST_F(EngineBufferScaleBungeeTest, MissAdvancesWithSilenceAndZeroReadsRemainBounded) {
     ready(2);
     std::array<float, 512> output{};
     reader.impulse = true;
@@ -175,12 +189,12 @@ TEST_F(EngineBufferScaleBungeeTest, MissAndZeroReadBudgetAreTransactional) {
     reader.impulseFrame = 0;
     scaler.clear();
     reader.miss = true;
-    const double positionBeforeMiss = reader.position;
-    EXPECT_EQ(0, scaler.scaleBuffer(output.data(), output.size()));
-    EXPECT_EQ(positionBeforeMiss, reader.position);
+    for (int callback = 0; callback < 16; ++callback) {
+        EXPECT_DOUBLE_EQ(256, scaler.scaleBuffer(output.data(), output.size()));
+    }
+    EXPECT_GT(reader.position, 0);
     reader.miss = false;
     EXPECT_GT(scaler.scaleBuffer(output.data(), output.size()), 0);
-    EXPECT_GT(std::abs(output[0]), 0.5f);
 
     scaler.clear();
     reader.zeroReads = 63;
