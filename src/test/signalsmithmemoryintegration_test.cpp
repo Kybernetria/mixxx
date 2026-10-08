@@ -25,21 +25,27 @@ TEST(KeylockEngineCompatibilityTest, HistoricalIdsAndUnavailableSelections) {
     EXPECT_EQ(3, static_cast<int>(EngineBuffer::KeylockEngine::RubberBandR3ShortWindow));
     EXPECT_EQ(4, static_cast<int>(EngineBuffer::KeylockEngine::Reserved));
     EXPECT_EQ(5, static_cast<int>(EngineBuffer::KeylockEngine::Signalsmith));
+#ifdef __RUBBERBAND__
+    EXPECT_EQ(EngineBuffer::KeylockEngine::RubberBandFaster,
+            EngineBuffer::defaultKeylockEngine());
+    EXPECT_TRUE(EngineBuffer::isKeylockEngineAvailable(
+            EngineBuffer::KeylockEngine::RubberBandFaster));
+#else
     EXPECT_EQ(EngineBuffer::KeylockEngine::Signalsmith,
             EngineBuffer::defaultKeylockEngine());
-    EXPECT_TRUE(EngineBuffer::isKeylockEngineAvailable(EngineBuffer::KeylockEngine::Signalsmith));
-    EXPECT_FALSE(EngineBuffer::isKeylockEngineAvailable(EngineBuffer::KeylockEngine::SoundTouch));
     EXPECT_FALSE(EngineBuffer::isKeylockEngineAvailable(
             EngineBuffer::KeylockEngine::RubberBandFaster));
+#endif
+    EXPECT_TRUE(EngineBuffer::isKeylockEngineAvailable(EngineBuffer::KeylockEngine::Signalsmith));
+    EXPECT_FALSE(EngineBuffer::isKeylockEngineAvailable(EngineBuffer::KeylockEngine::SoundTouch));
     for (const auto engine : EngineBuffer::kKeylockEngines) {
         EXPECT_EQ(EngineBuffer::isKeylockEngineAvailable(engine)
                         ? engine
-                        : EngineBuffer::KeylockEngine::Signalsmith,
+                        : EngineBuffer::defaultKeylockEngine(),
                 EngineBuffer::resolveKeylockEngine(
                         static_cast<double>(engine)));
     }
     for (const double id : {0.0,
-                 1.0,
                  2.0,
                  3.0,
                  4.0,
@@ -48,7 +54,7 @@ TEST(KeylockEngineCompatibilityTest, HistoricalIdsAndUnavailableSelections) {
                  0.5,
                  std::numeric_limits<double>::infinity(),
                  std::numeric_limits<double>::quiet_NaN()}) {
-        EXPECT_EQ(EngineBuffer::KeylockEngine::Signalsmith,
+        EXPECT_EQ(EngineBuffer::defaultKeylockEngine(),
                 EngineBuffer::resolveKeylockEngine(id));
     }
 }
@@ -1243,4 +1249,82 @@ TEST_F(SignalsmithMemoryIntegrationTest, TrackReplacementRejectsPublishedTarget)
     EXPECT_FALSE(engine()->queuedSeekPosition().isValid());
     EXPECT_NE(FramePos(5000), engine()->getExactPlayPos());
 }
+#ifdef __RUBBERBAND__
+class RubberBandMemoryIntegrationTest : public SignalsmithMemoryIntegrationTest {
+  protected:
+    void SetUp() override {
+        SignalsmithMemoryIntegrationTest::SetUp();
+        ControlObject::set(ConfigKey("[App]", "keylock_engine"),
+                static_cast<double>(EngineBuffer::KeylockEngine::RubberBandFaster));
+        process();
+        QTest::qWait(20);
+    }
+};
+
+TEST_F(RubberBandMemoryIntegrationTest, RepeatedBeatJumpsFollowOtherDeckElapsedTimeImmediately) {
+    auto* other = m_pChannel2->getEngineBuffer();
+    for (const auto mode : {SyncMode::None, SyncMode::Follower, SyncMode::LeaderExplicit}) {
+        for (const bool quantize : {false, true}) {
+            for (const bool reverse : {false, true}) {
+                SCOPED_TRACE(static_cast<int>(mode));
+                SCOPED_TRACE(quantize);
+                SCOPED_TRACE(reverse);
+                for (const auto& group : {m_sGroup1, m_sGroup2}) {
+                    ControlObject::set(ConfigKey(group, "play"), 0);
+                    ControlObject::set(ConfigKey(group, "quantize"), 0);
+                    ControlObject::set(ConfigKey(group, "reverse"), reverse ? 1 : 0);
+                }
+                for (auto* deck : {engine(), other}) {
+                    deck->requestSyncMode(SyncMode::None);
+                    const auto track = deck->getLoadedTrack();
+                    ASSERT_TRUE(track->trySetBeats(mixxx::Beats::fromConstTempo(
+                            track->getSampleRate(), FramePos(0), mixxx::Bpm(120))));
+                    deck->seekExact(FramePos(300000));
+                }
+                process();
+                for (const auto& group : {m_sGroup1, m_sGroup2}) {
+                    ControlObject::set(ConfigKey(group, "play"), 1);
+                }
+                for (int i = 0; i < 16; ++i) {
+                    process();
+                    QTest::qSleep(1);
+                }
+                ASSERT_NEAR(0, engine()->getExactPlayPos() - other->getExactPlayPos(), 1);
+                if (mode != SyncMode::None) {
+                    engine()->requestSyncMode(mode);
+                    other->requestSyncMode(mode == SyncMode::Follower
+                                    ? SyncMode::LeaderExplicit : SyncMode::Follower);
+                }
+                for (const auto& group : {m_sGroup1, m_sGroup2}) {
+                    ControlObject::set(ConfigKey(group, "quantize"), quantize ? 1 : 0);
+                }
+                process();
+                for (const double beats : {1.0, -1.0, 2.0, -2.0}) {
+                    SCOPED_TRACE(beats);
+                    const auto before = engine()->getExactPlayPos();
+                    const auto reference = other->getExactPlayPos();
+                    const double jumpFrames =
+                            engine()->getLoadedTrack()->getSampleRate().toDouble() * 0.5 * beats;
+                    ControlObject::set(ConfigKey(m_sGroup1, "beatjump"), 0);
+                    ControlObject::set(ConfigKey(m_sGroup1, "beatjump"), beats);
+                    ASSERT_TRUE(engine()->queuedSeekPosition().isValid());
+                    for (int i = 0; i < 16; ++i) {
+                        const auto previous = engine()->getExactPlayPos();
+                        process();
+                        EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
+                        EXPECT_NEAR(0,
+                                engine()->getExactPlayPos() -
+                                        (before + jumpFrames + (other->getExactPlayPos() - reference)),
+                                1);
+                        if (i > 0) {
+                            EXPECT_GT((reverse ? -1 : 1) *
+                                            (engine()->getExactPlayPos() - previous), 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+#endif
 } // namespace

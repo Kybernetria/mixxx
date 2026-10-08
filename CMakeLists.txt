@@ -4907,7 +4907,7 @@ target_include_directories(
 )
 target_link_libraries(mixxx-lib PRIVATE signalsmith)
 
-option(RUBBERBAND "Enable RubberBand pitch-shift effects" ON)
+option(RUBBERBAND "Enable RubberBand keylock and pitch-shift effects" ON)
 if(RUBBERBAND)
   find_package(rubberband REQUIRED)
   target_link_libraries(mixxx-lib PUBLIC rubberband::rubberband)
@@ -4915,7 +4915,12 @@ if(RUBBERBAND)
   target_sources(
     mixxx-lib
     PRIVATE src/effects/backends/builtin/pitchshifteffect.cpp
+            src/engine/bufferscalers/enginebufferscalerubberband.cpp
+            src/engine/bufferscalers/enginebufferscalerubberband.h
   )
+  if(BUILD_TESTING)
+    target_sources(mixxx-test PRIVATE src/test/enginebufferscalerubberbandtest.cpp)
+  endif()
 endif()
 
 # SndFile

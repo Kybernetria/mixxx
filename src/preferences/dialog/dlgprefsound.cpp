@@ -727,7 +727,6 @@ void DlgPrefSound::loadSettings(const SoundManagerConfig& config) {
         engineClockComboBox->setCurrentIndex(0);
     }
 
-    // Normalize the historical config key to the only supported deck engine.
     const auto keylockEngine = EngineBuffer::defaultKeylockEngine();
     m_pSettings->set(kKeylockEngingeCfgkey, ConfigValue(static_cast<int>(keylockEngine)));
     m_pKeylockEngine.set(static_cast<double>(keylockEngine));

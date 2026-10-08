@@ -46,6 +46,7 @@ class ControlPotmeter;
 class EngineBufferScale;
 class EngineBufferScaleLinear;
 class EngineBufferScaleSignalsmith;
+class EngineBufferScaleRubberBand;
 class EngineSync;
 class EngineWorkerScheduler;
 class VisualPlayPosition;
@@ -99,6 +100,9 @@ class EngineBuffer : public EngineObject {
 
     // intended for iteration over the KeylockEngine enum
     constexpr static std::initializer_list<KeylockEngine> kKeylockEngines = {
+#ifdef __RUBBERBAND__
+            KeylockEngine::RubberBandFaster,
+#endif
             KeylockEngine::Signalsmith,
     };
 
@@ -190,19 +194,31 @@ class EngineBuffer : public EngineObject {
     void loadFakeTrack(TrackPointer pTrack, bool bPlay);
 
     static QString getKeylockEngineName(KeylockEngine engine) {
+        if (engine == KeylockEngine::RubberBandFaster) {
+            return tr("Rubber Band Faster");
+        }
         return engine == KeylockEngine::Signalsmith
                 ? tr("Signalsmith Stretch")
-                : tr("Unknown, using Signalsmith Stretch");
+                : getKeylockEngineName(defaultKeylockEngine());
     }
 
     static bool isKeylockEngineAvailable(KeylockEngine engine) {
+#ifdef __RUBBERBAND__
+        if (engine == KeylockEngine::RubberBandFaster) {
+            return true;
+        }
+#endif
         return engine == KeylockEngine::Signalsmith;
     }
 
     static KeylockEngine resolveKeylockEngine(double savedId);
 
     constexpr static KeylockEngine defaultKeylockEngine() {
+#ifdef __RUBBERBAND__
+        return KeylockEngine::RubberBandFaster;
+#else
         return KeylockEngine::Signalsmith;
+#endif
     }
 
     // Request that the EngineBuffer load a track. Since the process is
@@ -479,6 +495,9 @@ class EngineBuffer : public EngineObject {
     EngineBufferScaleLinear* m_pScaleLinear;
     // Object used for pitch-independent time stretch (key lock) scaling.
     EngineBufferScaleSignalsmith* m_pScaleSignalsmith;
+#ifdef __RUBBERBAND__
+    EngineBufferScaleRubberBand* m_pScaleRubberBand;
+#endif
 
     // Indicates whether the scaler has changed since the last process()
     bool m_bScalerChanged;
