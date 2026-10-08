@@ -141,17 +141,15 @@ void EngineBufferScaleBungeeCore::setScaleParameters(double base_rate,
     }
 
     const double pitchScale = fabs(m_dBaseRate * *pPitchRatio);
-    if (util_isfinite(pitchScale) && pitchScale > 0.0) {
-        m_request.pitch = std::clamp(pitchScale, 0.25, 4.0);
-        *pPitchRatio = m_dBaseRate > 0 ? m_request.pitch / m_dBaseRate : 1.0;
-        m_dPitchRatio = *pPitchRatio;
-    } else {
-        m_request.pitch = 1.0;
-        *pPitchRatio = m_dBaseRate > 0 ? 1.0 / m_dBaseRate : 1.0;
-        m_dPitchRatio = *pPitchRatio;
+    const double requestedPitch = util_isfinite(pitchScale) && pitchScale > 0.0
+            ? std::clamp(pitchScale, 0.25, 4.0)
+            : 1.0;
+    *pPitchRatio = m_dBaseRate > 0 ? requestedPitch / m_dBaseRate : 1.0;
+    m_dPitchRatio = *pPitchRatio;
+    if (!m_grainPending) {
+        m_request.pitch = requestedPitch;
+        m_request.speed = m_dBaseRate * m_dTempoRatio;
     }
-
-    m_request.speed = m_dBaseRate * m_dTempoRatio;
 
     if (wasBackwards != m_bBackwards) {
         clear();
@@ -505,6 +503,10 @@ SINT EngineBufferScaleBungeeCore::processGrain(CSAMPLE* pOutputBuffer, SINT maxF
     m_pStretcher->next(m_request);
     m_grainPending = false;
     m_request.speed = m_effectiveRate;
+    const double pitchScale = fabs(m_dBaseRate * m_dPitchRatio);
+    m_request.pitch = util_isfinite(pitchScale) && pitchScale > 0.0
+            ? std::clamp(pitchScale, 0.25, 4.0)
+            : 1.0;
 
     if (!hasValidOutputChunk() || !m_outputChunk.request[0] ||
             !m_outputChunk.request[1] ||

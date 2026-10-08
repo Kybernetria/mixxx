@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "engine/bufferscalers/enginebufferscalebungee.h"
+#include "engine/bufferscalers/enginebufferscalebungeecore.h"
 #include "engine/readaheadmanager.h"
 #include "test/callbackallocationcheck.h"
 
@@ -37,7 +38,10 @@ class BungeeReader final : public ReadAheadManager {
                     ? (sourceFrame == impulseFrame ? 1.0f : 0.0f)
                     : static_cast<float>(std::sin(sourceFrame * 2 * M_PI * 440 / sourceSampleRate));
             for (int channel = 0; channel < channels; ++channel) {
-                output[frame * channels + channel] = value;
+                output[frame * channels + channel] = variedSignal
+                        ? static_cast<float>(0.3 * std::sin(sourceFrame * 0.011 + channel * 0.23) +
+                                  0.2 * std::sin(sourceFrame * 0.047))
+                        : value;
             }
         }
         position += frames * (rate < 0 ? -1 : 1);
@@ -51,6 +55,7 @@ class BungeeReader final : public ReadAheadManager {
     int sourceSampleRate{48000};
     bool miss{false};
     bool impulse{false};
+    bool variedSignal{false};
     int impulseFrame{12000};
     double position{10000};
     double totalRead{0};
@@ -202,6 +207,57 @@ TEST_F(EngineBufferScaleBungeeTest, CallbackOperationsDoNotAllocate) {
     mixxxtest::countCallbackAllocations = false;
     EXPECT_EQ(0u, mixxxtest::callbackAllocations);
     EXPECT_EQ(0u, mixxxtest::callbackDeallocations);
+}
+
+TEST(EngineBufferScaleBungeePendingGrainTest, ParameterChangesPreservePendingGrainTimeline) {
+    for (const int channels : {2, 8}) {
+        for (const double direction : {1.0, -1.0}) {
+            SCOPED_TRACE(channels);
+            SCOPED_TRACE(direction);
+            BungeeReader stalledReader;
+            BungeeReader referenceReader;
+            stalledReader.variedSignal = true;
+            referenceReader.variedSignal = true;
+            EngineBufferScaleBungeeCore stalled(&stalledReader);
+            EngineBufferScaleBungeeCore reference(&referenceReader);
+            for (auto* scaler : {&stalled, &reference}) {
+                scaler->setSignal(mixxx::audio::SampleRate(48000),
+                        mixxx::audio::ChannelCount(channels));
+                double tempo = direction;
+                double pitch = 1;
+                scaler->setScaleParameters(1, &tempo, &pitch);
+            }
+            std::array<float, 8> actual{};
+            std::array<float, 8> expected{};
+            for (int frame = 0; frame < 4096; ++frame) {
+                ASSERT_GT(stalled.scaleBuffer(actual.data(), channels), 0);
+                ASSERT_GT(reference.scaleBuffer(expected.data(), channels), 0);
+            }
+            stalledReader.miss = true;
+            int cachedFrames = 0;
+            while (stalled.scaleBuffer(actual.data(), channels) > 0) {
+                ASSERT_GT(reference.scaleBuffer(expected.data(), channels), 0);
+                ASSERT_LT(++cachedFrames, 20000);
+            }
+            ASSERT_GT(reference.scaleBuffer(expected.data(), channels), 0);
+            for (auto* scaler : {&stalled, &reference}) {
+                double tempo = direction * 1.37;
+                double pitch = 1.5;
+                scaler->setScaleParameters(1, &tempo, &pitch);
+            }
+            stalledReader.miss = false;
+            for (int frame = 0; frame < 4096; ++frame) {
+                if (frame > 0) {
+                    ASSERT_GT(reference.scaleBuffer(expected.data(), channels), 0);
+                }
+                ASSERT_GT(stalled.scaleBuffer(actual.data(), channels), 0);
+                for (int channel = 0; channel < channels; ++channel) {
+                    ASSERT_NEAR(expected[channel], actual[channel], 1e-6);
+                }
+            }
+            EXPECT_DOUBLE_EQ(referenceReader.position, stalledReader.position);
+        }
+    }
 }
 } // namespace
 
