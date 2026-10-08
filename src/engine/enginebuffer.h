@@ -148,6 +148,9 @@ class EngineBuffer : public EngineObject {
     bool isRecoveringLiveTimeline() const {
         return m_liveTimeline;
     }
+    bool isRecoveringBeatJumpTimeline() const {
+        return m_beatJumpTimeline;
+    }
     void requestEnableSync(bool enabled);
     void requestSyncMode(SyncMode mode);
 

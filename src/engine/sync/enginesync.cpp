@@ -453,6 +453,10 @@ void EngineSync::notifyScratching(Syncable* pSyncable, bool scratching) {
 void EngineSync::notifySeek(Syncable* pSyncable, mixxx::audio::FramePos position) {
     Q_UNUSED(position);
     if (isLeader(pSyncable->getSyncMode())) {
+        const auto* pChannel = pSyncable->getChannel();
+        if (pChannel && pChannel->getEngineBuffer()->isRecoveringBeatJumpTimeline()) {
+            return;
+        }
         // This relies on the bpmcontrol being notified about the seek before
         // the sync control, but that's ok because that's intrinsic to how the
         // controls are constructed (see the constructor of enginebuffer).
