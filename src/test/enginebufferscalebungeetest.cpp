@@ -24,6 +24,9 @@ class BungeeReader final : public ReadAheadManager {
             SINT samples,
             mixxx::audio::ChannelCount channels) override {
         const bool wasMissing = miss;
+        if (wasMissing && !advanceMisses) {
+            return 0;
+        }
         miss = false;
         const auto read = getNextSamplesForStretch(rate, output, samples, channels);
         miss = wasMissing;
@@ -68,6 +71,7 @@ class BungeeReader final : public ReadAheadManager {
     int readLimit{8192};
     int sourceSampleRate{48000};
     bool miss{false};
+    bool advanceMisses{true};
     bool impulse{false};
     bool variedSignal{false};
     int impulseFrame{12000};
@@ -231,6 +235,7 @@ TEST(EngineBufferScaleBungeePendingGrainTest, ParameterChangesPreservePendingGra
             BungeeReader stalledReader;
             BungeeReader referenceReader;
             stalledReader.variedSignal = true;
+            stalledReader.advanceMisses = false;
             referenceReader.variedSignal = true;
             EngineBufferScaleBungeeCore stalled(&stalledReader);
             EngineBufferScaleBungeeCore reference(&referenceReader);
