@@ -10,9 +10,6 @@
 #include "control/controlpushbutton.h"
 #include "engine/bufferscalers/enginebufferscalelinear.h"
 #include "engine/bufferscalers/enginebufferscalesignalsmith.h"
-#ifdef __RUBBERBAND__
-#include "engine/bufferscalers/enginebufferscalerubberband.h"
-#endif
 #include "engine/cachingreader/cachingreader.h"
 #include "engine/channels/enginechannel.h"
 #include "engine/controls/bpmcontrol.h"
@@ -284,9 +281,6 @@ EngineBuffer::EngineBuffer(const QString& group,
     // Construct scaling objects
     m_pScaleLinear = new EngineBufferScaleLinear(m_pReadAheadManager);
     m_pScaleSignalsmith = new EngineBufferScaleSignalsmith(m_pReadAheadManager);
-#ifdef __RUBBERBAND__
-    m_pScaleRubberBand = new EngineBufferScaleRubberBand(m_pReadAheadManager);
-#endif
     slotKeylockEngineChanged(m_pKeylockEngine->get());
     m_pScaleVinyl = m_pScaleLinear;
     m_pScale = m_pScaleVinyl;
@@ -340,9 +334,6 @@ EngineBuffer::~EngineBuffer() {
 
     delete m_pScaleLinear;
     delete m_pScaleSignalsmith;
-#ifdef __RUBBERBAND__
-    delete m_pScaleRubberBand;
-#endif
 
     delete m_pKeylock;
     delete m_pReplayGain;
@@ -944,7 +935,7 @@ std::uint64_t EngineBuffer::keylockPreparationSubmissionsForTest() const {
 
 EngineBuffer::KeylockEngine EngineBuffer::resolveKeylockEngine(double savedId) {
     if (!util_isfinite(savedId)) {
-        return defaultKeylockEngine();
+        return KeylockEngine::Signalsmith;
     }
     // Avoid floating-to-enum conversion until the saved numeric ID is validated.
     for (const auto engine : kKeylockEngines) {
@@ -952,23 +943,22 @@ EngineBuffer::KeylockEngine EngineBuffer::resolveKeylockEngine(double savedId) {
             return engine;
         }
     }
-    return defaultKeylockEngine();
+    // Legacy engines, reserved IDs, and invalid values deterministically use
+    // the only supported deck keylock engine.
+    return KeylockEngine::Signalsmith;
 }
 
 void EngineBuffer::slotKeylockEngineChanged(double dIndex) {
     if (m_bScalerOverride) {
         return;
     }
+    // Keep the legacy control/config key, but normalize every saved or live
+    // value to the sole supported deck keylock engine.
     const auto engine = resolveKeylockEngine(dIndex);
     if (dIndex != static_cast<double>(engine)) {
         m_pKeylockEngine->set(static_cast<double>(engine));
     }
     m_pScaleKeylock = m_pScaleSignalsmith;
-#ifdef __RUBBERBAND__
-    if (engine == KeylockEngine::RubberBandFaster) {
-        m_pScaleKeylock = m_pScaleRubberBand;
-    }
-#endif
 }
 
 void EngineBuffer::slipQuitAndAdopt() {
@@ -1071,14 +1061,6 @@ void EngineBuffer::processTrackLocked(
             }
         }
     }
-
-#ifdef __RUBBERBAND__
-    if (useIndependentPitchAndTempoScaling && m_callbackKeylockScale == m_pScaleRubberBand &&
-            !EngineBufferScaleRubberBand::supportsParameters(baseSampleRate, speed, pitchRatio)) {
-        useIndependentPitchAndTempoScaling = false;
-        pitchRatio = speed;
-    }
-#endif
 
     const bool finishScratchHandoff = m_scratching_old && !is_scratching && !is_reverse &&
             useIndependentPitchAndTempoScaling && m_pScale == m_pScaleVinyl &&
@@ -1364,9 +1346,6 @@ void EngineBuffer::process(CSAMPLE* pOutput,
             m_callbackKeylockScale = m_pScaleKeylock.load(std::memory_order_acquire);
             m_pScaleLinear->setSignal(m_sampleRate, m_channelCount);
             m_pScaleSignalsmith->setSignal(m_sampleRate, m_channelCount);
-#ifdef __RUBBERBAND__
-            m_pScaleRubberBand->setSignal(m_sampleRate, m_channelCount);
-#endif
             processTrackLocked(pOutput, bufferSize, m_sampleRate);
             processed = true;
         }
