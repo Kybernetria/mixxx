@@ -236,7 +236,7 @@ void EngineBufferScaleSignalsmith::onSignalChanged() {
             ? formatKey(getOutputSignal())
             : 0;
     m_state->requested.store(key, std::memory_order_release);
-    clear();
+    clearPreservingLiveTimeline();
 }
 
 void EngineBufferScaleSignalsmith::setScaleParameters(double baseRate,

@@ -150,6 +150,54 @@ TEST_F(EngineBufferScaleSignalsmithTest, LiveRecoveryPreservesImpulseTimelineAnd
     }
 }
 
+TEST_F(EngineBufferScaleSignalsmithTest, OutputSampleRateChangePreservesLiveTimelineDebt) {
+    for (const int channels : {2, 8}) {
+        for (const int initialSampleRate : {44100, 48000}) {
+            SCOPED_TRACE(channels);
+            SCOPED_TRACE(initialSampleRate);
+            ready(channels, initialSampleRate);
+            ASSERT_FALSE(HasFatalFailure());
+            constexpr int frames = 256;
+            constexpr int heldCallbacks = 12;
+            std::vector<float> output(frames * channels);
+            scaler.setPreparationPausedForTest(true);
+            scaler.setLiveTimeline(true);
+            for (int i = 0; i < heldCallbacks; ++i) {
+                ASSERT_EQ(0, scaler.scaleBuffer(output.data(), output.size()));
+            }
+            const int newSampleRate = initialSampleRate == 44100 ? 48000 : 44100;
+            scaler.setSignal(mixxx::audio::SampleRate(newSampleRate),
+                    mixxx::audio::ChannelCount(channels));
+            double tempo = 1;
+            double pitch = 1;
+            const double rate = static_cast<double>(initialSampleRate) / newSampleRate;
+            scaler.setScaleParameters(rate, &tempo, &pitch);
+            scaler.setLiveTimeline(true);
+            scaler.setPreparationPausedForTest(false);
+            double elapsed = heldCallbacks * frames;
+            double traversed = 0;
+            bool recovered = false;
+            for (int i = 0; i < 1000; ++i) {
+                const double delivered = scaler.scaleBuffer(output.data(), output.size());
+                elapsed += frames * rate;
+                traversed += delivered + scaler.discardedFrames();
+                if (delivered > 0) {
+                    const double tolerance = 64 * std::numeric_limits<double>::epsilon() *
+                            std::max(1.0, elapsed);
+                    EXPECT_GE(elapsed - traversed, -tolerance);
+                    EXPECT_LT(elapsed - traversed, rate + tolerance);
+                    if (!scaler.isRecoveringLiveTimeline()) {
+                        recovered = true;
+                        break;
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            EXPECT_TRUE(recovered);
+        }
+    }
+}
+
 TEST_F(EngineBufferScaleSignalsmithTest, ExactSeekCancelsLiveTimelineDebt) {
     ready();
     std::array<float, 512> output{};
