@@ -490,6 +490,7 @@ class EngineBuffer : public EngineObject {
     bool m_previousBufferSeek = false;
     bool m_liveTimeline = false;
     bool m_slipTimeline = false;
+    bool m_beatJumpTimeline = false;
     mixxx::audio::FramePos m_pendingSlipRestorePosition = mixxx::audio::kInvalidFramePos;
 
     QAtomicInt m_slipQuitAndAdopt;

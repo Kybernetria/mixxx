@@ -499,7 +499,12 @@ void EngineBuffer::setNewPlaypos(mixxx::audio::FramePos position) {
         // Before seeking, read extra buffer for crossfading.
         readToCrossfadeBuffer(m_lastBufferSize);
     }
-    m_pScale->clear();
+    if (m_beatJumpTimeline && m_pScale == m_pScaleSignalsmith &&
+            m_pScaleSignalsmith->isRecoveringLiveTimeline()) {
+        m_pScaleSignalsmith->clearPreservingLiveTimeline();
+    } else {
+        m_pScale->clear();
+    }
     // This accepted seek is an unconditional read-cursor re-anchor, even if
     // the old fade was already captured or its output format was stale.
     m_pReadAheadManager->notifySeek(m_playPos.toSamplePos(m_channelCount));
@@ -617,6 +622,9 @@ void EngineBuffer::applyTrackLoaded(TrackPointer pTrack,
     m_slipPos = mixxx::audio::kStartFramePos;
     m_dSlipRate = 0;
     m_pendingSlipRestorePosition = mixxx::audio::kInvalidFramePos;
+    m_liveTimeline = false;
+    m_slipTimeline = false;
+    m_beatJumpTimeline = false;
     m_naturalRateOld = 0;
     m_slipModeState = SlipModeState::Disabled;
 
@@ -695,6 +703,10 @@ void EngineBuffer::ejectTrack() {
     m_pReplayGain->set(0.0);
 
     m_queuedSeek.publish(kNoQueuedSeek);
+
+    m_liveTimeline = false;
+    m_slipTimeline = false;
+    m_beatJumpTimeline = false;
 
     m_pause.unlock();
 
@@ -1059,10 +1071,13 @@ void EngineBuffer::processTrackLocked(
         pitchRatio = speed;
     }
     if (is_scratching || paused ||
-            (!m_slipTimeline && (is_reverse || !m_quantize.toBool() ||
+            (m_beatJumpTimeline && is_reverse != m_reverse_old) ||
+            (!m_slipTimeline && !m_beatJumpTimeline &&
+                    (is_reverse || !m_quantize.toBool() ||
                     m_pSyncControl->getSyncMode() != SyncMode::Follower))) {
         m_liveTimeline = false;
         m_slipTimeline = false;
+        m_beatJumpTimeline = false;
     }
 
     if (speed != 0.0 || is_scratching) {
@@ -1209,6 +1224,7 @@ void EngineBuffer::processTrackLocked(
             m_liveTimeline = m_pScaleSignalsmith->isRecoveringLiveTimeline();
         }
         m_slipTimeline &= m_liveTimeline;
+        m_beatJumpTimeline &= m_liveTimeline;
         // Lookahead gathered for asynchronous preroll is not audible transport.
         // Use delivered source frames, not position deltas (which include loops).
         m_renderedIndicatorSpeed = baseSampleRate > 0
@@ -1536,7 +1552,13 @@ void EngineBuffer::processSeek(bool paused) {
     const QScopedValueRollback<mixxx::audio::FramePos> processingSeek(
             m_processingSeekPosition, position);
     m_slipTimeline = slipTimeline && !paused;
-    m_liveTimeline = m_slipTimeline || (liveTimeline && !paused && m_quantize.toBool() &&
+    const bool previousBeatJumpTimeline = m_beatJumpTimeline;
+    m_beatJumpTimeline = queuedSeek.seekType == SEEK_BEATJUMP && !paused;
+    if (m_beatJumpTimeline && !previousBeatJumpTimeline) {
+        m_pScaleSignalsmith->setLiveTimeline(false);
+    }
+    m_liveTimeline = m_slipTimeline || m_beatJumpTimeline ||
+            (liveTimeline && !paused && m_quantize.toBool() &&
             m_pSyncControl->getSyncMode() == SyncMode::Follower);
 
     // Don't allow the playposition to go past the end.

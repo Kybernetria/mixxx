@@ -199,6 +199,111 @@ class SignalsmithMemoryIntegrationTest : public SignalPathTest {
                 1e-9);
         engine()->setKeylockPreparationPausedForTest(false);
     }
+    void verifyBeatJumpTimeline(SyncMode mode, bool quantize, bool reverse) {
+        synchronizePlayingDecks(FramePos(200000));
+        ASSERT_FALSE(HasFatalFailure());
+        auto* other = m_pChannel2->getEngineBuffer();
+        if (mode == SyncMode::None) {
+            engine()->requestSyncMode(SyncMode::None);
+            other->requestSyncMode(SyncMode::None);
+        } else if (mode == SyncMode::LeaderExplicit) {
+            engine()->requestSyncMode(SyncMode::LeaderExplicit);
+            other->requestSyncMode(SyncMode::Follower);
+        }
+        for (const auto& group : {m_sGroup1, m_sGroup2}) {
+            ControlObject::set(ConfigKey(group, "quantize"), quantize ? 1 : 0);
+        }
+        process();
+        if (reverse) {
+            for (auto* deck : {engine(), other}) {
+                deck->setKeylockPreparationPausedForTest(true);
+            }
+            const auto submissions1 = engine()->keylockPreparationSubmissionsForTest();
+            const auto submissions2 = other->keylockPreparationSubmissionsForTest();
+            for (const auto& group : {m_sGroup1, m_sGroup2}) {
+                ControlObject::set(ConfigKey(group, "reverse"), 1);
+            }
+            for (int i = 0; i < 1000 &&
+                    (engine()->keylockPreparationSubmissionsForTest() == submissions1 ||
+                            other->keylockPreparationSubmissionsForTest() == submissions2);
+                    ++i) {
+                process();
+                QTest::qSleep(1);
+            }
+            ASSERT_GT(engine()->keylockPreparationSubmissionsForTest(), submissions1);
+            ASSERT_GT(other->keylockPreparationSubmissionsForTest(), submissions2);
+            for (auto* deck : {engine(), other}) {
+                deck->setKeylockPreparationPausedForTest(false);
+            }
+            for (int i = 0; i < 1000 &&
+                    (!engine()->keylockPreparationReadyForTest() ||
+                            !other->keylockPreparationReadyForTest());
+                    ++i) {
+                QTest::qWait(1);
+            }
+            ASSERT_TRUE(engine()->keylockPreparationReadyForTest());
+            ASSERT_TRUE(other->keylockPreparationReadyForTest());
+        }
+        int settled = 0;
+        const double direction = reverse ? -1 : 1;
+        for (int i = 0; i < 1000 && settled < 8; ++i) {
+            const auto before = engine()->getExactPlayPos();
+            process();
+            settled = std::fabs(engine()->getExactPlayPos() - other->getExactPlayPos()) < 1 &&
+                            direction * (engine()->getExactPlayPos() - before) > 0
+                    ? settled + 1
+                    : 0;
+            QTest::qSleep(1);
+        }
+        ASSERT_EQ(8, settled);
+        const auto visual = VisualPlayPosition::getVisualPlayPosition(m_sGroup1);
+        for (const double beats : {1.0, -1.0, 2.0}) {
+            SCOPED_TRACE(beats);
+            const auto before = engine()->getExactPlayPos();
+            const auto reference = other->getExactPlayPos();
+            const double jumpFrames =
+                    engine()->getLoadedTrack()->getSampleRate().toDouble() * 0.5 * beats;
+            engine()->setKeylockPreparationPausedForTest(true);
+            ControlObject::set(ConfigKey(m_sGroup1, "beatjump"), 0);
+            ControlObject::set(ConfigKey(m_sGroup1, "beatjump"), beats);
+            ASSERT_TRUE(engine()->queuedSeekPosition().isValid());
+            EXPECT_NEAR(0, engine()->queuedSeekPosition() - (before + jumpFrames), 1e-6);
+            for (int i = 0; i < 12; ++i) {
+                process();
+                EXPECT_TRUE(engine()->isRecoveringLiveTimeline());
+                QTest::qSleep(1);
+            }
+            ControlObject::set(ConfigKey(m_sGroup1, "beatjump"), 2 * beats);
+            ASSERT_TRUE(engine()->queuedSeekPosition().isValid());
+            EXPECT_NEAR(0,
+                    engine()->queuedSeekPosition() - (before + 3 * jumpFrames),
+                    1e-6);
+            for (int i = 0; i < 4; ++i) {
+                process();
+                EXPECT_TRUE(engine()->isRecoveringLiveTimeline());
+                QTest::qSleep(1);
+            }
+            engine()->setKeylockPreparationPausedForTest(false);
+            bool resumed = false;
+            for (int i = 0; i < 1000 && !resumed; ++i) {
+                process();
+                resumed = visual->getEnginePlayRateForTest() * direction > 0;
+                QTest::qSleep(1);
+            }
+            ASSERT_TRUE(resumed);
+            EXPECT_FALSE(engine()->isRecoveringLiveTimeline());
+            const auto expected =
+                    before + 3 * jumpFrames + (other->getExactPlayPos() - reference);
+            EXPECT_NEAR(0, engine()->getExactPlayPos() - expected, 1.0);
+            for (int i = 0; i < 8; ++i) {
+                process();
+                const auto currentExpected =
+                        before + 3 * jumpFrames + (other->getExactPlayPos() - reference);
+                EXPECT_NEAR(0, engine()->getExactPlayPos() - currentExpected, 1.0);
+                QTest::qSleep(1);
+            }
+        }
+    }
     void verifySlipRecoveryOnMovingTimeline(bool reverse, bool changeTempo) {
         ASSERT_TRUE(startSteadyPlayback());
         const double direction = reverse ? -1.0 : 1.0;
@@ -314,6 +419,26 @@ TEST_F(SignalsmithMemoryIntegrationTest, SyncedBeatJumpResumesOnMovingTimeline) 
         EXPECT_NEAR(0, engine()->getExactPlayPos() - currentExpected, 1.0);
         QTest::qSleep(1);
     }
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, LeaderBeatJumpPreservesMovingTimeline) {
+    verifyBeatJumpTimeline(SyncMode::LeaderExplicit, true, false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, RepeatedSyncedBeatJumpPreservesMovingTimeline) {
+    verifyBeatJumpTimeline(SyncMode::Follower, true, false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, UnsyncedBeatJumpPreservesMovingTimeline) {
+    verifyBeatJumpTimeline(SyncMode::None, true, false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, UnquantizedFollowerBeatJumpPreservesMovingTimeline) {
+    verifyBeatJumpTimeline(SyncMode::Follower, false, false);
+}
+
+TEST_F(SignalsmithMemoryIntegrationTest, ReverseFollowerBeatJumpPreservesMovingTimeline) {
+    verifyBeatJumpTimeline(SyncMode::Follower, true, true);
 }
 
 TEST_F(SignalsmithMemoryIntegrationTest, SyncedScratchReleaseDoesNotPrepareObsoleteAnchor) {

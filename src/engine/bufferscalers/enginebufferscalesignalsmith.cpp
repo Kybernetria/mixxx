@@ -291,6 +291,14 @@ void EngineBufferScaleSignalsmith::setLiveTimeline(bool enabled) {
     }
 }
 
+void EngineBufferScaleSignalsmith::clearPreservingLiveTimeline() {
+    const bool recovering = m_state->liveTimeline;
+    const double missedFrames = m_state->missedFrames;
+    clear();
+    m_state->liveTimeline = recovering;
+    m_state->missedFrames = recovering ? missedFrames : 0;
+}
+
 bool EngineBufferScaleSignalsmith::isRecoveringLiveTimeline() const {
     return m_state->liveTimeline;
 }
