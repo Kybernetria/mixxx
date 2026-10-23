@@ -3074,6 +3074,12 @@ if(BUILD_TESTING)
     PUBLIC RESOURCE_FOLDER="${CMAKE_CURRENT_SOURCE_DIR}/res"
   )
 
+  if(SIGNALSMITH)
+    target_sources(
+      mixxx-test PRIVATE src/test/enginebufferscalesignalsmithtest.cpp
+    )
+  endif()
+
   if(HID)
     target_sources(
       mixxx-test
